@@ -799,12 +799,12 @@ def sim_access(ctx: IAMContext, user: str | None, role: str | None, group: str |
     Exemplo:
       iam sim-access --user bob --action s3:GetObject --resource arn:aws:s3:::meu-bucket/*
     """
-    selected = sum(1 for x in [user, role, group] if x)
-    if selected == 0:
+    selected = sum(1 for x in [user, role] if x)
+    if selected == 0 and not group:
         click.echo("Error: You must specify --user, --role, or --group.", err=True)
         sys.exit(1)
     if selected > 1:
-        click.echo("Error: You can only specify one of --user, --role, or --group.", err=True)
+        click.echo("Error: You can only specify one of --user or --role.", err=True)
         sys.exit(1)
 
     ctx_map = {}
@@ -814,7 +814,7 @@ def sim_access(ctx: IAMContext, user: str | None, role: str | None, group: str |
                 k, v = pair.split("=", 1)
                 ctx_map[k.strip()] = v.strip()
 
-    if group:
+    if group and not user and not role:
         if group not in ctx.groups:
             raise EntityNotFoundError("Group", group)
         temp_user = User(UserName=f"__temp_{group}", Groups=[group])
@@ -828,6 +828,28 @@ def sim_access(ctx: IAMContext, user: str | None, role: str | None, group: str |
         )
         principal = group
         principal_type = "group"
+    elif user and group:
+        if user not in ctx.users:
+            raise EntityNotFoundError("User", user)
+        if group not in ctx.groups:
+            raise EntityNotFoundError("Group", group)
+        user_obj = ctx.users[user]
+        if group not in user_obj.Groups:
+            user_obj = User(
+                UserName=user_obj.UserName, UserId=user_obj.UserId,
+                Arn=user_obj.Arn, Groups=[group] + user_obj.Groups,
+                AttachedPolicies=list(user_obj.AttachedPolicies),
+            )
+        result = evaluate_access(
+            action=action,
+            resource=resource,
+            user=user_obj,
+            groups=ctx.groups,
+            policies=ctx.policies,
+            context=ctx_map,
+        )
+        principal = user
+        principal_type = "user"
     else:
         result = evaluate_access(
             action=action,
