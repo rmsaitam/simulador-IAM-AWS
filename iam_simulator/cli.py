@@ -773,6 +773,58 @@ def export_cmd(ctx: IAMContext, fmt: str, output: str | None):
         click.echo(content)
 
 
+@cli.command("import")
+@click.option("--file", "-f", "filepath", required=True, help="Arquivo JSON para importar")
+@click.option("--merge", "-m", is_flag=True, help="Mesclar com dados existentes (senão sobrescreve)")
+@pass_context
+def import_cmd(ctx: IAMContext, filepath: str, merge: bool):
+    """Importar dados IAM de um arquivo JSON."""
+    import os as _os
+    if not _os.path.exists(filepath):
+        click.echo(f"Error: File '{filepath}' not found.", err=True)
+        sys.exit(1)
+
+    with open(filepath) as f:
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError as e:
+            click.echo(f"Error: Invalid JSON: {e}", err=True)
+            sys.exit(1)
+
+    if not merge:
+        ctx.users.clear()
+        ctx.groups.clear()
+        ctx.policies.clear()
+        ctx.roles.clear()
+
+    for name, udata in data.get("users", {}).items():
+        if merge and name in ctx.users:
+            continue
+        ctx.users[name] = User.from_dict(udata)
+
+    for name, gdata in data.get("groups", {}).items():
+        if merge and name in ctx.groups:
+            continue
+        ctx.groups[name] = Group.from_dict(gdata)
+
+    for name, pdata in data.get("policies", {}).items():
+        if merge and name in ctx.policies:
+            continue
+        ctx.policies[name] = Policy.from_dict(pdata)
+
+    for name, rdata in data.get("roles", {}).items():
+        if merge and name in ctx.roles:
+            continue
+        ctx.roles[name] = Role.from_dict(rdata)
+
+    ctx.save()
+    click.echo(f"Imported successfully from {filepath}")
+    click.echo(f"  Users: {len(ctx.users)}")
+    click.echo(f"  Groups: {len(ctx.groups)}")
+    click.echo(f"  Policies: {len(ctx.policies)}")
+    click.echo(f"  Roles: {len(ctx.roles)}")
+
+
 @cli.command("seed")
 @pass_context
 def seed(ctx: IAMContext):
