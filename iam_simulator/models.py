@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Any
 import time
+import uuid
 
 
 def _timestamp() -> str:
@@ -91,7 +92,7 @@ class User:
 
     def __post_init__(self):
         if not self.UserId:
-            self.UserId = f"AIDAXXXXXXXXXXXXXXXXX"
+            self.UserId = f"AIDA{uuid.uuid4().hex[:16].upper()}"
         if not self.Arn:
             self.Arn = f"arn:aws:iam::123456789012:user/{self.UserName}"
         if not self.CreateDate:
@@ -126,7 +127,7 @@ class Group:
 
     def __post_init__(self):
         if not self.GroupId:
-            self.GroupId = f"AIDAXXXXXXXXXXXXXXXXX"
+            self.GroupId = f"AGPA{uuid.uuid4().hex[:16].upper()}"
         if not self.Arn:
             self.Arn = f"arn:aws:iam::123456789012:group/{self.GroupName}"
         if not self.CreateDate:
@@ -161,7 +162,7 @@ class Role:
 
     def __post_init__(self):
         if not self.RoleId:
-            self.RoleId = f"AROAXXXXXXXXXXXXXXXXX"
+            self.RoleId = f"AROA{uuid.uuid4().hex[:16].upper()}"
         if not self.Arn:
             self.Arn = f"arn:aws:iam::123456789012:role/{self.RoleName}"
         if not self.CreateDate:
