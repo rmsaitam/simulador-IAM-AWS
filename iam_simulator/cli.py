@@ -15,7 +15,7 @@ from .exceptions import (
 from .models import User, Group, Policy, Role
 from .storage import load_data, persist_all, load_users, load_groups, load_policies, load_roles
 from .policy_engine import evaluate_access
-from .services import get_service_from_arn, get_actions_for_service, list_services, validate_action
+from .services import get_service_from_arn, get_actions_for_service, list_services, validate_action, SERVICE_ACTIONS
 
 DATA_FILE = None  # Usa o padrão
 
@@ -645,23 +645,25 @@ def role_detach_policy(ctx: IAMContext, role_name: str, policy_name: str):
 @cli.command("sim-access")
 @click.option("--user", "-u", default=None, help="Usuário a ser testado")
 @click.option("--role", "-r", default=None, help="Role a ser testada")
+@click.option("--group", "-g", default=None, help="Grupo a ser testado")
 @click.option("--action", "-a", required=True, help="Ação a ser testada (ex: s3:GetObject)")
 @click.option("--resource", "-R", required=True, help="ARN do recurso (ex: arn:aws:s3:::bucket/*)")
 @click.option("--context", "-c", default="", help="Contexto key=value separado por vírgula")
 @click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def sim_access(ctx: IAMContext, user: str | None, role: str | None,
+def sim_access(ctx: IAMContext, user: str | None, role: str | None, group: str | None,
                action: str, resource: str, context: str, json_output: bool):
     """Simular acesso a um recurso AWS.
 
     Exemplo:
       iam sim-access --user bob --action s3:GetObject --resource arn:aws:s3:::meu-bucket/*
     """
-    if not user and not role:
-        click.echo("Error: You must specify --user or --role.", err=True)
+    selected = sum(1 for x in [user, role, group] if x)
+    if selected == 0:
+        click.echo("Error: You must specify --user, --role, or --group.", err=True)
         sys.exit(1)
-    if user and role:
-        click.echo("Error: You cannot specify both --user and --role.", err=True)
+    if selected > 1:
+        click.echo("Error: You can only specify one of --user, --role, or --group.", err=True)
         sys.exit(1)
 
     ctx_map = {}
@@ -671,18 +673,32 @@ def sim_access(ctx: IAMContext, user: str | None, role: str | None,
                 k, v = pair.split("=", 1)
                 ctx_map[k.strip()] = v.strip()
 
-    result = evaluate_access(
-        action=action,
-        resource=resource,
-        user=ctx.users.get(user) if user else None,
-        role=ctx.roles.get(role) if role else None,
-        groups=ctx.groups,
-        policies=ctx.policies,
-        context=ctx_map,
-    )
-
-    principal = user or role
-    principal_type = "user" if user else "role"
+    if group:
+        if group not in ctx.groups:
+            raise EntityNotFoundError("Group", group)
+        temp_user = User(UserName=f"__temp_{group}", Groups=[group])
+        result = evaluate_access(
+            action=action,
+            resource=resource,
+            user=temp_user,
+            groups=ctx.groups,
+            policies=ctx.policies,
+            context=ctx_map,
+        )
+        principal = group
+        principal_type = "group"
+    else:
+        result = evaluate_access(
+            action=action,
+            resource=resource,
+            user=ctx.users.get(user) if user else None,
+            role=ctx.roles.get(role) if role else None,
+            groups=ctx.groups,
+            policies=ctx.policies,
+            context=ctx_map,
+        )
+        principal = user or role
+        principal_type = "user" if user else "role"
 
     if result["allowed"]:
         if json_output:
@@ -1054,6 +1070,148 @@ def validate_policy(document: str, from_file: bool):
         sys.exit(1)
     else:
         click.secho("Policy document is valid.", fg="green", bold=True)
+
+
+@cli.command("what-can")
+@click.option("--user", "-u", default=None, help="Usuário a ser consultado")
+@click.option("--role", "-r", default=None, help="Role a ser consultada")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
+@pass_context
+def what_can(ctx: IAMContext, user: str | None, role: str | None, json_output: bool):
+    """Listar todas as permissões efetivas de um usuário ou role."""
+    if not user and not role:
+        click.echo("Error: You must specify --user or --role.", err=True)
+        sys.exit(1)
+    if user and role:
+        click.echo("Error: You cannot specify both --user and --role.", err=True)
+        sys.exit(1)
+
+    if user:
+        if user not in ctx.users:
+            raise EntityNotFoundError("User", user)
+        principal_name = user
+        principal_type = "user"
+    else:
+        if role not in ctx.roles:
+            raise EntityNotFoundError("Role", role)
+        principal_name = role
+        principal_type = "role"
+
+    all_actions = set()
+    for svc, actions in SERVICE_ACTIONS.items():
+        for action in actions:
+            all_actions.add(action)
+
+    allowed = []
+    denied = []
+
+    for action in sorted(all_actions):
+        for svc_resource in ["*"]:
+            resource = f"arn:aws:{action.split(':')[0]}:*:*:*"
+            result = evaluate_access(
+                action=action,
+                resource=resource,
+                user=ctx.users.get(user) if user else None,
+                role=ctx.roles.get(role) if role else None,
+                groups=ctx.groups,
+                policies=ctx.policies,
+            )
+            if result["allowed"]:
+                allowed.append({"action": action, "policies": result["matched_policies"]})
+            elif result["reason"] == "Deny":
+                denied.append({"action": action, "denied_by": result["denied_by"]})
+
+    if json_output:
+        click.echo(json.dumps({
+            "principal": principal_name,
+            "principal_type": principal_type,
+            "allowed_count": len(allowed),
+            "denied_count": len(denied),
+            "allowed": allowed,
+            "denied": denied,
+        }, indent=2))
+    else:
+        click.echo(f"\nPermissions for {principal_type}: {principal_name}")
+        click.echo(f"  Allowed: {len(allowed)} actions")
+        click.echo(f"  Denied:  {len(denied)} actions")
+        if allowed:
+            click.echo("\n  Allowed actions:")
+            for item in allowed:
+                click.echo(f"    {item['action']}  ({', '.join(item['policies'])})")
+        if denied:
+            click.echo("\n  Denied actions:")
+            for item in denied:
+                click.echo(f"    {item['action']}  (denied by: {item['denied_by']})")
+        click.echo("")
+
+
+@cli.command("who-can")
+@click.option("--action", "-a", required=True, help="Ação a ser verificada (ex: s3:DeleteObject)")
+@click.option("--resource", "-R", required=True, help="ARN do recurso")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
+@pass_context
+def who_can(ctx: IAMContext, action: str, resource: str, json_output: bool):
+    """Listar quem tem acesso a uma ação em um recurso."""
+    results = []
+
+    for name, user_obj in ctx.users.items():
+        result = evaluate_access(
+            action=action,
+            resource=resource,
+            user=user_obj,
+            groups=ctx.groups,
+            policies=ctx.policies,
+        )
+        results.append({
+            "name": name,
+            "type": "user",
+            "allowed": result["allowed"],
+            "reason": result["reason"],
+            "matched_policies": result["matched_policies"],
+            "denied_by": result["denied_by"],
+        })
+
+    for name, role_obj in ctx.roles.items():
+        result = evaluate_access(
+            action=action,
+            resource=resource,
+            role=role_obj,
+            groups=ctx.groups,
+            policies=ctx.policies,
+        )
+        results.append({
+            "name": name,
+            "type": "role",
+            "allowed": result["allowed"],
+            "reason": result["reason"],
+            "matched_policies": result["matched_policies"],
+            "denied_by": result["denied_by"],
+        })
+
+    allowed = [r for r in results if r["allowed"]]
+    denied = [r for r in results if r["reason"] == "Deny"]
+
+    if json_output:
+        click.echo(json.dumps({
+            "action": action,
+            "resource": resource,
+            "allowed": allowed,
+            "denied": denied,
+        }, indent=2))
+    else:
+        click.echo(f"\nWho can: {action} on {resource}")
+        if allowed:
+            click.secho(f"\n  Allowed ({len(allowed)}):", fg="green")
+            for r in allowed:
+                policies = ', '.join(r['matched_policies'])
+                click.echo(f"    {r['type']}: {r['name']}  ({policies})")
+        if denied:
+            click.secho(f"\n  Denied ({len(denied)}):", fg="red")
+            for r in denied:
+                click.echo(f"    {r['type']}: {r['name']}  (denied by: {r['denied_by']})")
+        if not allowed and not denied:
+            click.echo("\n  No principals found.")
+        click.echo("")
 
 
 # ─── HANDLER DE ERROS ─────────────────────────────────────────────
