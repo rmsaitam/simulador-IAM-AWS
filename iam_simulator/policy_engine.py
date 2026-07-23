@@ -34,7 +34,7 @@ def _action_match(pattern: str, action: str) -> bool:
 
 
 def _evaluate_condition(condition: dict[str, Any], context: dict[str, str]) -> bool:
-    """Avalia uma condição básica. Retorna True se a condição é satisfeita."""
+    """Avalia uma condição. Retorna True se a condição é satisfeita."""
     if not condition:
         return True
 
@@ -64,6 +64,120 @@ def _evaluate_condition(condition: dict[str, Any], context: dict[str, str]) -> b
                     for ev in expected_values:
                         if fnmatch(actual_value, ev):
                             return False
+                elif condition_op == "StringEqualsIgnoreCase":
+                    if actual_value.lower() not in [v.lower() for v in expected_values]:
+                        return False
+                elif condition_op == "StringStartsWith":
+                    matched = False
+                    for ev in expected_values:
+                        if actual_value.startswith(ev):
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "StringEndsWith":
+                    matched = False
+                    for ev in expected_values:
+                        if actual_value.endswith(ev):
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "StringContains":
+                    matched = False
+                    for ev in expected_values:
+                        if ev in actual_value:
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "NumericEquals":
+                    try:
+                        if float(actual_value) not in [float(v) for v in expected_values]:
+                            return False
+                    except ValueError:
+                        return False
+                elif condition_op == "NumericNotEquals":
+                    try:
+                        if float(actual_value) in [float(v) for v in expected_values]:
+                            return False
+                    except ValueError:
+                        return False
+                elif condition_op == "NumericLessThan":
+                    try:
+                        if float(actual_value) >= float(expected_values[0]):
+                            return False
+                    except (ValueError, IndexError):
+                        return False
+                elif condition_op == "NumericLessThanEquals":
+                    try:
+                        if float(actual_value) > float(expected_values[0]):
+                            return False
+                    except (ValueError, IndexError):
+                        return False
+                elif condition_op == "NumericGreaterThan":
+                    try:
+                        if float(actual_value) <= float(expected_values[0]):
+                            return False
+                    except (ValueError, IndexError):
+                        return False
+                elif condition_op == "NumericGreaterThanEquals":
+                    try:
+                        if float(actual_value) < float(expected_values[0]):
+                            return False
+                    except (ValueError, IndexError):
+                        return False
+                elif condition_op == "Bool":
+                    actual_lower = actual_value.lower()
+                    if actual_lower not in [v.lower() for v in expected_values]:
+                        return False
+                elif condition_op == "ArnLike":
+                    matched = False
+                    for ev in expected_values:
+                        if fnmatch(actual_value, ev):
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "ArnEquals":
+                    if actual_value not in expected_values:
+                        return False
+                elif condition_op == "ArnNotLike":
+                    for ev in expected_values:
+                        if fnmatch(actual_value, ev):
+                            return False
+                elif condition_op == "ArnNotEquals":
+                    if actual_value in expected_values:
+                        return False
+                elif condition_op == "IpAddress":
+                    matched = False
+                    for ev in expected_values:
+                        if fnmatch(actual_value, ev):
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "NotIpAddress":
+                    for ev in expected_values:
+                        if fnmatch(actual_value, ev):
+                            return False
+                elif condition_op == "Null":
+                    check_not_exists = expected_values[0].lower() == "true" if expected_values else False
+                    value_exists = key in context
+                    if check_not_exists and value_exists:
+                        return False
+                    if not check_not_exists and not value_exists:
+                        return False
+                elif condition_op == "ForAllValues":
+                    actual_set = set(actual_value.split(",")) if actual_value else set()
+                    expected_set = set(expected_values)
+                    if not actual_set.issubset(expected_set):
+                        return False
+                elif condition_op == "ForAnyValue":
+                    actual_set = set(actual_value.split(",")) if actual_value else set()
+                    expected_set = set(expected_values)
+                    if not actual_set.intersection(expected_set):
+                        return False
     return True
 
 
@@ -152,7 +266,7 @@ def evaluate_access(action: str, resource: str,
     Retorna:
         {
             "allowed": bool,
-            "reason": "Allow" | "Deny" | "ImplicitDeny",
+            "reason": "Allow" | "Deny" | "ImplicitDeny" | "BoundaryDeny",
             "matched_policies": list[str],
             "denied_by": str | None,
         }
@@ -162,15 +276,20 @@ def evaluate_access(action: str, resource: str,
     context = context or {}
 
     collected_policies: list[Policy] = []
+    boundary_name: str | None = None
 
     if user:
         collected_policies = _collect_policies_from_user(user, groups, policies)
         principal_arn = user.Arn
         principal_name = user.UserName
+        if user.PermissionBoundary and user.PermissionBoundary in policies:
+            boundary_name = user.PermissionBoundary
     elif role:
         collected_policies = _collect_policies_from_role(role, policies)
         principal_arn = role.Arn
         principal_name = role.RoleName
+        if role.PermissionBoundary and role.PermissionBoundary in policies:
+            boundary_name = role.PermissionBoundary
     else:
         return {
             "allowed": False,
@@ -204,21 +323,79 @@ def evaluate_access(action: str, resource: str,
             "principal_name": principal_name,
         }
 
-    if matched:
+    if not matched:
         return {
-            "allowed": True,
-            "reason": "Allow",
-            "matched_policies": matched,
+            "allowed": False,
+            "reason": "ImplicitDeny",
+            "matched_policies": [],
             "denied_by": None,
             "principal_arn": principal_arn,
             "principal_name": principal_name,
         }
 
+    if boundary_name:
+        boundary_policy = policies[boundary_name]
+        boundary_stmts = boundary_policy.statements()
+        boundary_result = _eval_statements(boundary_stmts, action, resource, context)
+        if boundary_result != "Allow":
+            return {
+                "allowed": False,
+                "reason": "BoundaryDeny",
+                "matched_policies": matched,
+                "denied_by": boundary_name,
+                "principal_arn": principal_arn,
+                "principal_name": principal_name,
+            }
+
     return {
-        "allowed": False,
-        "reason": "ImplicitDeny",
-        "matched_policies": [],
+        "allowed": True,
+        "reason": "Allow",
+        "matched_policies": matched,
         "denied_by": None,
         "principal_arn": principal_arn,
         "principal_name": principal_name,
     }
+
+
+def evaluate_trust_policy(role: Role, principal_arn: str, principal_type: str = "User") -> dict[str, Any]:
+    """
+    Avalia se um principal pode assumir uma role (trust policy).
+
+    Retorna:
+        {
+            "allowed": bool,
+            "reason": "Allow" | "Deny" | "ImplicitDeny",
+        }
+    """
+    trust_doc = role.AssumeRolePolicyDocument
+    if not trust_doc:
+        return {"allowed": False, "reason": "ImplicitDeny"}
+
+    stmts = trust_doc.get("Statement", [])
+    if isinstance(stmts, dict):
+        stmts = [stmts]
+
+    for stmt in stmts:
+        if stmt.get("Effect") != "Allow":
+            continue
+
+        principal = stmt.get("Principal", {})
+        if isinstance(principal, str) and principal == "*":
+            return {"allowed": True, "reason": "Allow"}
+
+        if isinstance(principal, dict):
+            aws_principals = principal.get("AWS", [])
+            if isinstance(aws_principals, str):
+                aws_principals = [aws_principals]
+            service_principals = principal.get("Service", [])
+            if isinstance(service_principals, str):
+                service_principals = [service_principals]
+
+            if principal_arn in aws_principals or "*" in aws_principals:
+                return {"allowed": True, "reason": "Allow"}
+
+            if principal_type == "Service":
+                if principal_arn in service_principals or "*" in service_principals:
+                    return {"allowed": True, "reason": "Allow"}
+
+    return {"allowed": False, "reason": "ImplicitDeny"}

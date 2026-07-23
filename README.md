@@ -144,6 +144,21 @@ $ iam sim-access --user admin --action rds:DeleteDBInstance \
   Access Granted
 ```
 
+### 6. Testar Acesso via Grupo
+
+```bash
+# Testar acesso do grupo Developers (usuário temporário)
+$ iam sim-access --group Developers --action s3:GetObject \
+    --resource "arn:aws:s3:::mybucket/*"
+  Access Granted
+
+# Testar acesso de um usuário através de um grupo específico
+$ iam sim-access --user dev-alice --group Developers --action s3:GetObject \
+    --resource "arn:aws:s3:::mybucket/file.txt"
+  Access Granted
+  Matched policies: S3FullAccess
+```
+
 ## Resumo das Permissões
 
 | Serviço | Developer | Admin |
@@ -164,25 +179,33 @@ $ iam sim-access --user admin --action rds:DeleteDBInstance \
 
 ## Comandos
 
+### Opção Global
+
+```bash
+iam --data-file <arquivo.json> <comando>  # Usar arquivo de dados alternativo
+```
+
 ### Usuários
 
 ```bash
-iam user create <nome> [--groups g1,g2] [--policies p1,p2]
-iam user list [--verbose]
-iam user get <nome>
+iam user create <nome> [--groups g1,g2] [--policies p1,p2] [--tags k1=v1,k2=v2] [--permission-boundary <policy>]
+iam user list [--verbose] [--filter <termo>] [--json-output]
+iam user get <nome> [--json-output]
 iam user delete <nome>
 iam user attach-policy <user> <policy>
 iam user detach-policy <user> <policy>
 iam user add-group <user> <group>
 iam user remove-group <user> <group>
+iam user attach-permission-boundary <user> <policy>
+iam user detach-permission-boundary <user>
 ```
 
 ### Grupos
 
 ```bash
-iam group create <nome> [--policies p1,p2]
-iam group list [--verbose]
-iam group get <nome>
+iam group create <nome> [--policies p1,p2] [--tags k1=v1,k2=v2]
+iam group list [--verbose] [--filter <termo>] [--json-output]
+iam group get <nome> [--json-output]
 iam group delete <nome>
 iam group attach-policy <group> <policy>
 iam group detach-policy <group> <policy>
@@ -193,37 +216,67 @@ iam group detach-policy <group> <policy>
 ```bash
 iam policy create <nome> --document '{"Version":"2012-10-17","Statement":[...]}'
 iam policy create <nome> --document ./policy.json --file
-iam policy list [--verbose]
-iam policy get <nome>
+iam policy list [--verbose] [--filter <termo|attached|unattached>] [--json-output]
+iam policy get <nome> [--json-output]
 iam policy delete <nome>
 ```
 
 ### Roles
 
 ```bash
-iam role create <nome> [--trust-policy <json>] [--policies p1,p2]
-iam role list [--verbose]
-iam role get <nome>
+iam role create <nome> [--trust-policy <json>] [--policies p1,p2] [--tags k1=v1,k2=val2] [--permission-boundary <policy>]
+iam role list [--verbose] [--filter <termo>] [--json-output]
+iam role get <nome> [--json-output]
 iam role delete <nome>
 iam role attach-policy <role> <policy>
 iam role detach-policy <role> <policy>
+iam role attach-permission-boundary <role> <policy>
+iam role detach-permission-boundary <role>
 ```
 
 ### Simulação de Acesso
 
 ```bash
-iam sim-access --user <user> --action <action> --resource <arn>
-iam sim-access --role <role> --action <action> --resource <arn>
-iam sim-access --user <user> --action <action> --resource <arn> --json-output
+iam sim-access --user <user> --action <action> --resource <arn> [--json-output]
+iam sim-access --role <role> --action <action> --resource <arn> [--json-output]
+iam sim-access --group <group> --action <action> --resource <arn> [--json-output]
+iam sim-access --user <user> --group <group> --action <action> --resource <arn>  # Acesso via grupo
+iam sim-access --user <user> --action <action> --resource <arn> --context key1=val1,key2=val2
 ```
 
-### Utilitários
+### Quem Pode Fazer O Quê
 
 ```bash
+# Listar todas as permissões de um usuário ou role
+iam what-can --user <user>
+iam what-can --role <role>
+
+# Listar quem tem acesso a uma ação em um recurso
+iam who-can --action <action> --resource <arn>
+```
+
+### Validação e Importação/Exportação
+
+```bash
+# Validar documento de política
+iam validate --document '{"Version":"2012-10-17","Statement":[...]}'
+
+# Importar dados IAM de um arquivo JSON
+iam import --file data.json [--merge]
+
+# Exportar dados IAM
+iam export [--format json|table]
+```
+
+### Relatório e Utilitários
+
+```bash
+# Relatório de segurança completo
+iam report [--output report.json]
+
 iam stats          # Estatísticas
-iam seed           # Dados de exemplo alternativos
+iam seed           # Dados de exemplo
 iam services       # Serviços e ações disponíveis
-iam export         # Exportar dados (json/table)
 ```
 
 ## Lógica de Avaliação
@@ -231,7 +284,43 @@ iam export         # Exportar dados (json/table)
 1. Coleta todas as políticas aplicáveis (inline + gerenciadas + grupos)
 2. Verifica **Explicit Deny** (sempre vence)
 3. Verifica **Allow** (pelo menos uma política deve permitir)
-4. Sem allow = **ImplicitDeny**
+4. Verifica **Permission Boundary** (se definida, deve permitir também)
+5. Sem allow = **ImplicitDeny**
+
+### Permission Boundaries
+
+Permission boundaries definem o limite máximo de permissões. Mesmo que uma política permita, a boundary deve permitir também:
+
+```bash
+# Criar política de boundary (somente leitura)
+iam policy create ReadOnlyBoundary --document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:Get*","s3:List*","ec2:Describe*"],"Resource":"*"}]}'
+
+# Criar usuário com boundary
+iam user create dev-readonly --policies S3FullAccess --permission-boundary ReadOnlyBoundary
+
+# Resultado: pode ler (Get), mas não pode escrever (Put)
+$ iam sim-access --user dev-readonly --action s3:GetObject --resource "arn:aws:s3:::bucket/*"
+  Access Granted
+
+$ iam sim-access --user dev-readonly --action s3:PutObject --resource "arn:aws:s3:::bucket/*"
+  AccessDeniedException (BoundaryDeny)
+```
+
+### Condições Suportadas
+
+- `StringEquals`, `StringNotEquals`, `StringEqualsIgnoreCase`
+- `StringLike`, `StringNotLike`
+- `StringStartsWith`, `StringEndsWith`, `StringContains`
+- `NumericEquals`, `NumericNotEquals`, `NumericGreaterThan`, `NumericLessThan`
+- `Bool`
+- `ArnLike`, `ArnEquals`, `ArnNotLike`, `ArnNotEquals`
+- `IpAddress`, `NotIpAddress`
+- `Null`
+- `ForAllValues`, `AnyValue`
+
+## Validação de Nomes
+
+Nomes de entidades IAM devem ter no máximo 64 caracteres e conter apenas: `[a-zA-Z0-9+=,.@_-]`
 
 ## Testes
 
