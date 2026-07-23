@@ -1,0 +1,930 @@
+"""CLI principal do simulador IAM AWS."""
+
+import json
+import sys
+from pathlib import Path
+
+import click
+
+from .exceptions import (
+    IAMSimulatorError,
+    EntityAlreadyExistsError,
+    EntityNotFoundError,
+    AccessDeniedError,
+)
+from .models import User, Group, Policy, Role
+from .storage import load_data, persist_all, load_users, load_groups, load_policies, load_roles
+from .policy_engine import evaluate_access
+from .services import get_service_from_arn, get_actions_for_service, list_services, validate_action
+
+DATA_FILE = None  # Usa o padrão
+
+
+class IAMContext:
+    """Contexto compartilhado entre os comandos CLI."""
+    def __init__(self):
+        self.data = load_data()
+        self.users = load_users(self.data)
+        self.groups = load_groups(self.data)
+        self.policies = load_policies(self.data)
+        self.roles = load_roles(self.data)
+
+    def save(self):
+        persist_all(self.users, self.groups, self.policies, self.roles)
+
+
+pass_context = click.make_pass_decorator(IAMContext, ensure=True)
+
+
+class IAMGroup(click.Group):
+    """Grupo CLI com tratamento de exceções do simulador."""
+    def invoke(self, ctx):
+        try:
+            super().invoke(ctx)
+        except IAMSimulatorError as e:
+            raise click.ClickException(str(e))
+
+
+# ─── CLI Principal ────────────────────────────────────────────────
+
+@click.group(cls=IAMGroup)
+@click.version_option(version="1.0.0", prog_name="iam-simulator")
+def cli():
+    """Simulador IAM AWS - CLI para simular políticas e acesso a recursos AWS."""
+    pass
+
+
+# ─── USUÁRIOS ─────────────────────────────────────────────────────
+
+@cli.group()
+def user():
+    """Gerenciar usuários IAM."""
+    pass
+
+
+@user.command("create")
+@click.argument("name")
+@click.option("--groups", "-g", default="", help="Grupos separados por vírgula")
+@click.option("--policies", "-p", default="", help="Políticas separadas por vírgula")
+@pass_context
+def user_create(ctx: IAMContext, name: str, groups: str, policies: str):
+    """Criar um novo usuário IAM."""
+    if name in ctx.users:
+        raise EntityAlreadyExistsError("User", name)
+
+    group_list = [g.strip() for g in groups.split(",") if g.strip()]
+    policy_list = [p.strip() for p in policies.split(",") if p.strip()]
+
+    for gname in group_list:
+        if gname not in ctx.groups:
+            raise EntityNotFoundError("Group", gname)
+    for pname in policy_list:
+        if pname not in ctx.policies:
+            raise EntityNotFoundError("Policy", pname)
+
+    user_obj = User(UserName=name, Groups=group_list, AttachedPolicies=policy_list)
+
+    for gname in group_list:
+        ctx.groups[gname].Members.append(name)
+
+    ctx.users[name] = user_obj
+    ctx.save()
+    click.echo(f"User '{name}' created successfully.")
+    if group_list:
+        click.echo(f"  Groups: {', '.join(group_list)}")
+    if policy_list:
+        click.echo(f"  Policies: {', '.join(policy_list)}")
+
+
+@user.command("list")
+@click.option("--verbose", "-v", is_flag=True, help="Mostrar detalhes")
+@pass_context
+def user_list(ctx: IAMContext, verbose: bool):
+    """Listar todos os usuários."""
+    if not ctx.users:
+        click.echo("No users found.")
+        return
+
+    for name, u in sorted(ctx.users.items()):
+        if verbose:
+            click.echo(f"  {u.UserName}")
+            click.echo(f"    ARN: {u.Arn}")
+            click.echo(f"    Groups: {', '.join(u.Groups) if u.Groups else 'none'}")
+            click.echo(f"    Policies: {', '.join(u.AttachedPolicies) if u.AttachedPolicies else 'none'}")
+        else:
+            click.echo(f"  {u.UserName}")
+
+
+@user.command("delete")
+@click.argument("name")
+@pass_context
+def user_delete(ctx: IAMContext, name: str):
+    """Deletar um usuário IAM."""
+    if name not in ctx.users:
+        raise EntityNotFoundError("User", name)
+
+    user_obj = ctx.users[name]
+    for gname in user_obj.Groups:
+        if gname in ctx.groups:
+            ctx.groups[gname].Members = [
+                m for m in ctx.groups[gname].Members if m != name
+            ]
+    del ctx.users[name]
+    ctx.save()
+    click.echo(f"User '{name}' deleted successfully.")
+
+
+@user.command("get")
+@click.argument("name")
+@pass_context
+def user_get(ctx: IAMContext, name: str):
+    """Obter detalhes de um usuário."""
+    if name not in ctx.users:
+        raise EntityNotFoundError("User", name)
+
+    u = ctx.users[name]
+    click.echo(f"User: {u.UserName}")
+    click.echo(f"  ARN: {u.Arn}")
+    click.echo(f"  UserId: {u.UserId}")
+    click.echo(f"  CreateDate: {u.CreateDate}")
+    click.echo(f"  Groups: {', '.join(u.Groups) if u.Groups else 'none'}")
+    click.echo(f"  AttachedPolicies: {', '.join(u.AttachedPolicies) if u.AttachedPolicies else 'none'}")
+    if u.InlinePolicies:
+        click.echo(f"  InlinePolicies:")
+        for ip in u.InlinePolicies:
+            click.echo(f"    - {ip.get('PolicyName', 'unnamed')}")
+
+
+@user.command("attach-policy")
+@click.argument("user_name")
+@click.argument("policy_name")
+@pass_context
+def user_attach_policy(ctx: IAMContext, user_name: str, policy_name: str):
+    """Anexar uma política a um usuário."""
+    if user_name not in ctx.users:
+        raise EntityNotFoundError("User", user_name)
+    if policy_name not in ctx.policies:
+        raise EntityNotFoundError("Policy", policy_name)
+    if policy_name in ctx.users[user_name].AttachedPolicies:
+        click.echo(f"Policy '{policy_name}' already attached to user '{user_name}'.")
+        return
+
+    ctx.users[user_name].AttachedPolicies.append(policy_name)
+    ctx.policies[policy_name].AttachmentCount += 1
+    ctx.save()
+    click.echo(f"Policy '{policy_name}' attached to user '{user_name}'.")
+
+
+@user.command("detach-policy")
+@click.argument("user_name")
+@click.argument("policy_name")
+@pass_context
+def user_detach_policy(ctx: IAMContext, user_name: str, policy_name: str):
+    """Remover uma política de um usuário."""
+    if user_name not in ctx.users:
+        raise EntityNotFoundError("User", user_name)
+    if policy_name not in ctx.users[user_name].AttachedPolicies:
+        click.echo(f"Policy '{policy_name}' is not attached to user '{user_name}'.")
+        return
+
+    ctx.users[user_name].AttachedPolicies.remove(policy_name)
+    if policy_name in ctx.policies:
+        ctx.policies[policy_name].AttachmentCount = max(
+            0, ctx.policies[policy_name].AttachmentCount - 1
+        )
+    ctx.save()
+    click.echo(f"Policy '{policy_name}' detached from user '{user_name}'.")
+
+
+@user.command("add-group")
+@click.argument("user_name")
+@click.argument("group_name")
+@pass_context
+def user_add_group(ctx: IAMContext, user_name: str, group_name: str):
+    """Adicionar um usuário a um grupo."""
+    if user_name not in ctx.users:
+        raise EntityNotFoundError("User", user_name)
+    if group_name not in ctx.groups:
+        raise EntityNotFoundError("Group", group_name)
+    if group_name in ctx.users[user_name].Groups:
+        click.echo(f"User '{user_name}' is already in group '{group_name}'.")
+        return
+
+    ctx.users[user_name].Groups.append(group_name)
+    ctx.groups[group_name].Members.append(user_name)
+    ctx.save()
+    click.echo(f"User '{user_name}' added to group '{group_name}'.")
+
+
+@user.command("remove-group")
+@click.argument("user_name")
+@click.argument("group_name")
+@pass_context
+def user_remove_group(ctx: IAMContext, user_name: str, group_name: str):
+    """Remover um usuário de um grupo."""
+    if user_name not in ctx.users:
+        raise EntityNotFoundError("User", user_name)
+    if group_name not in ctx.users[user_name].Groups:
+        click.echo(f"User '{user_name}' is not in group '{group_name}'.")
+        return
+
+    ctx.users[user_name].Groups.remove(group_name)
+    ctx.groups[group_name].Members = [
+        m for m in ctx.groups[group_name].Members if m != user_name
+    ]
+    ctx.save()
+    click.echo(f"User '{user_name}' removed from group '{group_name}'.")
+
+
+# ─── GRUPOS ───────────────────────────────────────────────────────
+
+@cli.group()
+def group():
+    """Gerenciar grupos IAM."""
+    pass
+
+
+@group.command("create")
+@click.argument("name")
+@click.option("--policies", "-p", default="", help="Políticas separadas por vírgula")
+@pass_context
+def group_create(ctx: IAMContext, name: str, policies: str):
+    """Criar um novo grupo IAM."""
+    if name in ctx.groups:
+        raise EntityAlreadyExistsError("Group", name)
+
+    policy_list = [p.strip() for p in policies.split(",") if p.strip()]
+    for pname in policy_list:
+        if pname not in ctx.policies:
+            raise EntityNotFoundError("Policy", pname)
+
+    group_obj = Group(GroupName=name, AttachedPolicies=policy_list)
+    for pname in policy_list:
+        ctx.policies[pname].AttachmentCount += 1
+
+    ctx.groups[name] = group_obj
+    ctx.save()
+    click.echo(f"Group '{name}' created successfully.")
+    if policy_list:
+        click.echo(f"  Policies: {', '.join(policy_list)}")
+
+
+@group.command("list")
+@click.option("--verbose", "-v", is_flag=True, help="Mostrar detalhes")
+@pass_context
+def group_list(ctx: IAMContext, verbose: bool):
+    """Listar todos os grupos."""
+    if not ctx.groups:
+        click.echo("No groups found.")
+        return
+
+    for name, g in sorted(ctx.groups.items()):
+        if verbose:
+            click.echo(f"  {g.GroupName}")
+            click.echo(f"    ARN: {g.Arn}")
+            click.echo(f"    Members: {', '.join(g.Members) if g.Members else 'none'}")
+            click.echo(f"    Policies: {', '.join(g.AttachedPolicies) if g.AttachedPolicies else 'none'}")
+        else:
+            click.echo(f"  {g.GroupName}")
+
+
+@group.command("delete")
+@click.argument("name")
+@pass_context
+def group_delete(ctx: IAMContext, name: str):
+    """Deletar um grupo IAM."""
+    if name not in ctx.groups:
+        raise EntityNotFoundError("Group", name)
+
+    group_obj = ctx.groups[name]
+    for mname in group_obj.Members:
+        if mname in ctx.users:
+            ctx.users[mname].Groups = [
+                g for g in ctx.users[mname].Groups if g != name
+            ]
+
+    for pname in group_obj.AttachedPolicies:
+        if pname in ctx.policies:
+            ctx.policies[pname].AttachmentCount = max(
+                0, ctx.policies[pname].AttachmentCount - 1
+            )
+
+    del ctx.groups[name]
+    ctx.save()
+    click.echo(f"Group '{name}' deleted successfully.")
+
+
+@group.command("get")
+@click.argument("name")
+@pass_context
+def group_get(ctx: IAMContext, name: str):
+    """Obter detalhes de um grupo."""
+    if name not in ctx.groups:
+        raise EntityNotFoundError("Group", name)
+
+    g = ctx.groups[name]
+    click.echo(f"Group: {g.GroupName}")
+    click.echo(f"  ARN: {g.Arn}")
+    click.echo(f"  GroupId: {g.GroupId}")
+    click.echo(f"  CreateDate: {g.CreateDate}")
+    click.echo(f"  Members: {', '.join(g.Members) if g.Members else 'none'}")
+    click.echo(f"  AttachedPolicies: {', '.join(g.AttachedPolicies) if g.AttachedPolicies else 'none'}")
+
+
+@group.command("attach-policy")
+@click.argument("group_name")
+@click.argument("policy_name")
+@pass_context
+def group_attach_policy(ctx: IAMContext, group_name: str, policy_name: str):
+    """Anexar uma política a um grupo."""
+    if group_name not in ctx.groups:
+        raise EntityNotFoundError("Group", group_name)
+    if policy_name not in ctx.policies:
+        raise EntityNotFoundError("Policy", policy_name)
+    if policy_name in ctx.groups[group_name].AttachedPolicies:
+        click.echo(f"Policy '{policy_name}' already attached to group '{group_name}'.")
+        return
+
+    ctx.groups[group_name].AttachedPolicies.append(policy_name)
+    ctx.policies[policy_name].AttachmentCount += 1
+    ctx.save()
+    click.echo(f"Policy '{policy_name}' attached to group '{group_name}'.")
+
+
+@group.command("detach-policy")
+@click.argument("group_name")
+@click.argument("policy_name")
+@pass_context
+def group_detach_policy(ctx: IAMContext, group_name: str, policy_name: str):
+    """Remover uma política de um grupo."""
+    if group_name not in ctx.groups:
+        raise EntityNotFoundError("Group", group_name)
+    if policy_name not in ctx.groups[group_name].AttachedPolicies:
+        click.echo(f"Policy '{policy_name}' is not attached to group '{group_name}'.")
+        return
+
+    ctx.groups[group_name].AttachedPolicies.remove(policy_name)
+    if policy_name in ctx.policies:
+        ctx.policies[policy_name].AttachmentCount = max(
+            0, ctx.policies[policy_name].AttachmentCount - 1
+        )
+    ctx.save()
+    click.echo(f"Policy '{policy_name}' detached from group '{group_name}'.")
+
+
+# ─── POLÍTICAS ────────────────────────────────────────────────────
+
+@cli.group()
+def policy():
+    """Gerenciar políticas IAM."""
+    pass
+
+
+@policy.command("create")
+@click.argument("name")
+@click.option("--document", "-d", required=True, help="JSON do documento da política (inline ou caminho de arquivo)")
+@click.option("--file", "-f", "from_file", is_flag=True, help="Indica que --document é um caminho de arquivo")
+@pass_context
+def policy_create(ctx: IAMContext, name: str, document: str, from_file: bool):
+    """Criar uma nova política IAM."""
+    if name in ctx.policies:
+        raise EntityAlreadyExistsError("Policy", name)
+
+    if from_file:
+        doc_path = Path(document)
+        if not doc_path.exists():
+            click.echo(f"Error: File '{document}' not found.", err=True)
+            sys.exit(1)
+        with open(doc_path) as f:
+            doc = json.load(f)
+    else:
+        try:
+            doc = json.loads(document)
+        except json.JSONDecodeError as e:
+            click.echo(f"Error: Invalid JSON: {e}", err=True)
+            sys.exit(1)
+
+    if "Version" not in doc:
+        doc["Version"] = "2012-10-17"
+    if "Statement" not in doc:
+        click.echo("Error: Policy must contain a 'Statement' field.", err=True)
+        sys.exit(1)
+
+    policy_obj = Policy(PolicyName=name, PolicyDocument=doc)
+    ctx.policies[name] = policy_obj
+    ctx.save()
+    click.echo(f"Policy '{name}' created successfully.")
+    click.echo(f"  ARN: {policy_obj.Arn}")
+
+
+@policy.command("list")
+@click.option("--verbose", "-v", is_flag=True, help="Mostrar detalhes")
+@pass_context
+def policy_list(ctx: IAMContext, verbose: bool):
+    """Listar todas as políticas."""
+    if not ctx.policies:
+        click.echo("No policies found.")
+        return
+
+    for name, p in sorted(ctx.policies.items()):
+        if verbose:
+            click.echo(f"  {p.PolicyName}")
+            click.echo(f"    ARN: {p.Arn}")
+            click.echo(f"    Attachments: {p.AttachmentCount}")
+        else:
+            click.echo(f"  {p.PolicyName}")
+
+
+@policy.command("delete")
+@click.argument("name")
+@pass_context
+def policy_delete(ctx: IAMContext, name: str):
+    """Deletar uma política IAM."""
+    if name not in ctx.policies:
+        raise EntityNotFoundError("Policy", name)
+
+    del ctx.policies[name]
+    ctx.save()
+    click.echo(f"Policy '{name}' deleted successfully.")
+
+
+@policy.command("get")
+@click.argument("name")
+@pass_context
+def policy_get(ctx: IAMContext, name: str):
+    """Obter detalhes e documento de uma política."""
+    if name not in ctx.policies:
+        raise EntityNotFoundError("Policy", name)
+
+    p = ctx.policies[name]
+    click.echo(f"Policy: {p.PolicyName}")
+    click.echo(f"  ARN: {p.Arn}")
+    click.echo(f"  CreateDate: {p.CreateDate}")
+    click.echo(f"  Attachments: {p.AttachmentCount}")
+    click.echo(f"  Document:")
+    click.echo(json.dumps(p.PolicyDocument, indent=4))
+
+
+# ─── ROLES ────────────────────────────────────────────────────────
+
+@cli.group()
+def role():
+    """Gerenciar roles IAM."""
+    pass
+
+
+@role.command("create")
+@click.argument("name")
+@click.option("--trust-policy", "-t", default="", help="Trust policy JSON (inline ou arquivo)")
+@click.option("--policies", "-p", default="", help="Políticas separadas por vírgula")
+@click.option("--file", "-f", "from_file", is_flag=True, help="Indica que --trust-policy é um caminho de arquivo")
+@pass_context
+def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, from_file: bool):
+    """Criar uma nova role IAM."""
+    if name in ctx.roles:
+        raise EntityAlreadyExistsError("Role", name)
+
+    if trust_policy:
+        if from_file:
+            tp_path = Path(trust_policy)
+            if not tp_path.exists():
+                click.echo(f"Error: File '{trust_policy}' not found.", err=True)
+                sys.exit(1)
+            with open(tp_path) as f:
+                tp_doc = json.load(f)
+        else:
+            try:
+                tp_doc = json.loads(trust_policy)
+            except json.JSONDecodeError as e:
+                click.echo(f"Error: Invalid JSON: {e}", err=True)
+                sys.exit(1)
+    else:
+        tp_doc = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"Service": "ec2.amazonaws.com"},
+                    "Action": "sts:AssumeRole",
+                }
+            ],
+        }
+
+    policy_list = [p.strip() for p in policies.split(",") if p.strip()]
+    for pname in policy_list:
+        if pname not in ctx.policies:
+            raise EntityNotFoundError("Policy", pname)
+
+    role_obj = Role(
+        RoleName=name,
+        AssumeRolePolicyDocument=tp_doc,
+        AttachedPolicies=policy_list,
+    )
+    for pname in policy_list:
+        ctx.policies[pname].AttachmentCount += 1
+
+    ctx.roles[name] = role_obj
+    ctx.save()
+    click.echo(f"Role '{name}' created successfully.")
+    click.echo(f"  ARN: {role_obj.Arn}")
+
+
+@role.command("list")
+@click.option("--verbose", "-v", is_flag=True, help="Mostrar detalhes")
+@pass_context
+def role_list(ctx: IAMContext, verbose: bool):
+    """Listar todas as roles."""
+    if not ctx.roles:
+        click.echo("No roles found.")
+        return
+
+    for name, r in sorted(ctx.roles.items()):
+        if verbose:
+            click.echo(f"  {r.RoleName}")
+            click.echo(f"    ARN: {r.Arn}")
+            click.echo(f"    Policies: {', '.join(r.AttachedPolicies) if r.AttachedPolicies else 'none'}")
+        else:
+            click.echo(f"  {r.RoleName}")
+
+
+@role.command("delete")
+@click.argument("name")
+@pass_context
+def role_delete(ctx: IAMContext, name: str):
+    """Deletar uma role IAM."""
+    if name not in ctx.roles:
+        raise EntityNotFoundError("Role", name)
+
+    del ctx.roles[name]
+    ctx.save()
+    click.echo(f"Role '{name}' deleted successfully.")
+
+
+@role.command("get")
+@click.argument("name")
+@pass_context
+def role_get(ctx: IAMContext, name: str):
+    """Obter detalhes de uma role."""
+    if name not in ctx.roles:
+        raise EntityNotFoundError("Role", name)
+
+    r = ctx.roles[name]
+    click.echo(f"Role: {r.RoleName}")
+    click.echo(f"  ARN: {r.Arn}")
+    click.echo(f"  RoleId: {r.RoleId}")
+    click.echo(f"  CreateDate: {r.CreateDate}")
+    click.echo(f"  AttachedPolicies: {', '.join(r.AttachedPolicies) if r.AttachedPolicies else 'none'}")
+    click.echo(f"  AssumeRolePolicyDocument:")
+    click.echo(json.dumps(r.AssumeRolePolicyDocument, indent=4))
+
+
+@role.command("attach-policy")
+@click.argument("role_name")
+@click.argument("policy_name")
+@pass_context
+def role_attach_policy(ctx: IAMContext, role_name: str, policy_name: str):
+    """Anexar uma política a uma role."""
+    if role_name not in ctx.roles:
+        raise EntityNotFoundError("Role", role_name)
+    if policy_name not in ctx.policies:
+        raise EntityNotFoundError("Policy", policy_name)
+    if policy_name in ctx.roles[role_name].AttachedPolicies:
+        click.echo(f"Policy '{policy_name}' already attached to role '{role_name}'.")
+        return
+
+    ctx.roles[role_name].AttachedPolicies.append(policy_name)
+    ctx.policies[policy_name].AttachmentCount += 1
+    ctx.save()
+    click.echo(f"Policy '{policy_name}' attached to role '{role_name}'.")
+
+
+@role.command("detach-policy")
+@click.argument("role_name")
+@click.argument("policy_name")
+@pass_context
+def role_detach_policy(ctx: IAMContext, role_name: str, policy_name: str):
+    """Remover uma política de uma role."""
+    if role_name not in ctx.roles:
+        raise EntityNotFoundError("Role", role_name)
+    if policy_name not in ctx.roles[role_name].AttachedPolicies:
+        click.echo(f"Policy '{policy_name}' is not attached to role '{role_name}'.")
+        return
+
+    ctx.roles[role_name].AttachedPolicies.remove(policy_name)
+    if policy_name in ctx.policies:
+        ctx.policies[policy_name].AttachmentCount = max(
+            0, ctx.policies[policy_name].AttachmentCount - 1
+        )
+    ctx.save()
+    click.echo(f"Policy '{policy_name}' detached from role '{role_name}'.")
+
+
+# ─── SIMULAÇÃO DE ACESSO ──────────────────────────────────────────
+
+@cli.command("sim-access")
+@click.option("--user", "-u", default=None, help="Usuário a ser testado")
+@click.option("--role", "-r", default=None, help="Role a ser testada")
+@click.option("--action", "-a", required=True, help="Ação a ser testada (ex: s3:GetObject)")
+@click.option("--resource", "-R", required=True, help="ARN do recurso (ex: arn:aws:s3:::bucket/*)")
+@click.option("--context", "-c", default="", help="Contexto key=value separado por vírgula")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
+@pass_context
+def sim_access(ctx: IAMContext, user: str | None, role: str | None,
+               action: str, resource: str, context: str, json_output: bool):
+    """Simular acesso a um recurso AWS.
+
+    Exemplo:
+      iam sim-access --user bob --action s3:GetObject --resource arn:aws:s3:::meu-bucket/*
+    """
+    if not user and not role:
+        click.echo("Error: You must specify --user or --role.", err=True)
+        sys.exit(1)
+    if user and role:
+        click.echo("Error: You cannot specify both --user and --role.", err=True)
+        sys.exit(1)
+
+    ctx_map = {}
+    if context:
+        for pair in context.split(","):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                ctx_map[k.strip()] = v.strip()
+
+    result = evaluate_access(
+        action=action,
+        resource=resource,
+        user=ctx.users.get(user) if user else None,
+        role=ctx.roles.get(role) if role else None,
+        groups=ctx.groups,
+        policies=ctx.policies,
+        context=ctx_map,
+    )
+
+    principal = user or role
+    principal_type = "user" if user else "role"
+
+    if result["allowed"]:
+        if json_output:
+            click.echo(json.dumps({
+                "status": "Access Granted",
+                "principal": principal,
+                "principal_type": principal_type,
+                "action": action,
+                "resource": resource,
+                "matched_policies": result["matched_policies"],
+            }, indent=2))
+        else:
+            click.secho("\n  Access Granted", fg="green", bold=True)
+            click.echo(f"  User: {result['principal_name']} successfully accessed {action} on {resource}")
+            click.echo(f"  Matched policies: {', '.join(result['matched_policies'])}\n")
+    else:
+        reason = result["reason"]
+        if json_output:
+            click.echo(json.dumps({
+                "status": "Access Denied",
+                "error_code": "AccessDeniedException",
+                "message": f"User: {result['principal_arn']} is not authorized to perform: {action} on resource: {resource}",
+                "principal": principal,
+                "principal_type": principal_type,
+                "reason": reason,
+                "denied_by": result["denied_by"],
+                "matched_policies": result["matched_policies"],
+            }, indent=2))
+        else:
+            click.secho("\n  An error occurred (AccessDeniedException) when calling the "
+                        f"{action.split(':')[1] if ':' in action else action} operation:",
+                        fg="red", bold=True)
+            click.echo(f"  User: {result['principal_arn']} is not authorized to perform: "
+                       f"{action} on resource: {resource}")
+            if reason == "Deny" and result["denied_by"]:
+                click.echo(f"  Explicit deny by policy: {result['denied_by']}")
+            elif reason == "ImplicitDeny":
+                click.echo(f"  No matching allow policy found (implicit deny)")
+            click.echo("")
+
+
+# ─── UTILITÁRIOS ──────────────────────────────────────────────────
+
+@cli.command("stats")
+@pass_context
+def stats(ctx: IAMContext):
+    """Mostrar estatísticas do IAM simulado."""
+    click.echo("IAM Simulator Stats:")
+    click.echo(f"  Users:      {len(ctx.users)}")
+    click.echo(f"  Groups:     {len(ctx.groups)}")
+    click.echo(f"  Policies:   {len(ctx.policies)}")
+    click.echo(f"  Roles:      {len(ctx.roles)}")
+
+
+@cli.command("export")
+@click.option("--format", "-f", "fmt", type=click.Choice(["json", "table"]), default="json")
+@click.option("--output", "-o", default=None, help="Arquivo de saída (default: stdout)")
+@pass_context
+def export_cmd(ctx: IAMContext, fmt: str, output: str | None):
+    """Exportar dados IAM."""
+    data = {
+        "users": {n: u.to_dict() for n, u in ctx.users.items()},
+        "groups": {n: g.to_dict() for n, g in ctx.groups.items()},
+        "policies": {n: p.to_dict() for n, p in ctx.policies.items()},
+        "roles": {n: r.to_dict() for n, r in ctx.roles.items()},
+    }
+
+    if fmt == "json":
+        content = json.dumps(data, indent=2)
+    else:
+        lines = []
+        lines.append(f"{'Type':<10} {'Name':<25} {'ARN'}")
+        lines.append("-" * 80)
+        for n, u in sorted(ctx.users.items()):
+            lines.append(f"{'User':<10} {u.UserName:<25} {u.Arn}")
+        for n, g in sorted(ctx.groups.items()):
+            lines.append(f"{'Group':<10} {g.GroupName:<25} {g.Arn}")
+        for n, p in sorted(ctx.policies.items()):
+            lines.append(f"{'Policy':<10} {p.PolicyName:<25} {p.Arn}")
+        for n, r in sorted(ctx.roles.items()):
+            lines.append(f"{'Role':<10} {r.RoleName:<25} {r.Arn}")
+        content = "\n".join(lines)
+
+    if output:
+        Path(output).write_text(content)
+        click.echo(f"Exported to {output}")
+    else:
+        click.echo(content)
+
+
+@cli.command("seed")
+@pass_context
+def seed(ctx: IAMContext):
+    """Criar dados de exemplo (seed)."""
+    # Políticas
+    policies_data = {
+        "AdministratorAccess": {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": ["*"], "Resource": ["*"]}],
+        },
+        "S3ReadOnlyAccess": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": ["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation"],
+                    "Resource": ["arn:aws:s3:::*", "arn:aws:s3:::*/*"],
+                }
+            ],
+        },
+        "S3FullAccess": {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": ["s3:*"], "Resource": ["arn:aws:s3:::*", "arn:aws:s3:::*/*"]}],
+        },
+        "LambdaInvokeFunction": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": ["lambda:InvokeFunction", "lambda:InvokeAsync"],
+                    "Resource": ["arn:aws:lambda:*:*:function:*"],
+                }
+            ],
+        },
+        "EC2ReadOnlyAccess": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": ["ec2:Describe*"],
+                    "Resource": ["*"],
+                }
+            ],
+        },
+        "EC2FullAccess": {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": ["ec2:*"], "Resource": ["*"]}],
+        },
+        "DynamoDBReadOnlyAccess": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": ["dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:DescribeTable", "dynamodb:ListTables"],
+                    "Resource": ["arn:aws:dynamodb:*:*:table/*"],
+                }
+            ],
+        },
+        "DynamoDBFullAccess": {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": ["dynamodb:*"], "Resource": ["arn:aws:dynamodb:*:*:table/*"]}],
+        },
+        "ReadOnlyAccess": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3:GetObject", "s3:ListBucket",
+                        "ec2:Describe*",
+                        "lambda:GetFunction", "lambda:ListFunctions",
+                        "dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:DescribeTable",
+                        "rds:DescribeDBInstances", "rds:DescribeDBClusters",
+                        "sns:ListTopics", "sns:GetTopicAttributes",
+                        "sqs:ListQueues", "sqs:GetQueueAttributes",
+                    ],
+                    "Resource": ["*"],
+                }
+            ],
+        },
+        "DenyS3Delete": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Deny",
+                    "Action": ["s3:DeleteObject", "s3:DeleteBucket"],
+                    "Resource": ["arn:aws:s3:::*", "arn:aws:s3:::*/*"],
+                }
+            ],
+        },
+    }
+
+    for pname, pdoc in policies_data.items():
+        if pname not in ctx.policies:
+            ctx.policies[pname] = Policy(PolicyName=pname, PolicyDocument=pdoc)
+
+    # Grupos
+    groups_data = {
+        "Admins": {"policies": ["AdministratorAccess"]},
+        "Developers": {"policies": ["S3FullAccess", "EC2FullAccess", "LambdaInvokeFunction", "DynamoDBFullAccess"]},
+        "Analysts": {"policies": ["ReadOnlyAccess", "S3ReadOnlyAccess"]},
+        "DevOps": {"policies": ["EC2FullAccess", "S3FullAccess", "DynamoDBFullAccess"]},
+    }
+
+    for gname, gdata in groups_data.items():
+        if gname not in ctx.groups:
+            ctx.groups[gname] = Group(GroupName=gname, AttachedPolicies=gdata["policies"])
+
+    # Usuários
+    users_data = {
+        "admin": {"groups": ["Admins"], "policies": []},
+        "dev-alice": {"groups": ["Developers"], "policies": []},
+        "dev-bob": {"groups": ["Developers"], "policies": ["DenyS3Delete"]},
+        "analyst-carol": {"groups": ["Analysts"], "policies": []},
+        "devops-dave": {"groups": ["DevOps"], "policies": ["DynamoDBReadOnlyAccess"]},
+    }
+
+    for uname, udata in users_data.items():
+        if uname not in ctx.users:
+            ctx.users[uname] = User(
+                UserName=uname,
+                Groups=udata["groups"],
+                AttachedPolicies=udata["policies"],
+            )
+
+    # Roles
+    roles_data = {
+        "EC2InstanceRole": {
+            "trust": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}]},
+            "policies": ["S3ReadOnlyAccess", "DynamoDBReadOnlyAccess"],
+        },
+        "LambdaExecutionRole": {
+            "trust": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": {"Service": "lambda.amazonaws.com"}, "Action": "sts:AssumeRole"}]},
+            "policies": ["DynamoDBFullAccess"],
+        },
+    }
+
+    for rname, rdata in roles_data.items():
+        if rname not in ctx.roles:
+            ctx.roles[rname] = Role(
+                RoleName=rname,
+                AssumeRolePolicyDocument=rdata["trust"],
+                AttachedPolicies=rdata["policies"],
+            )
+
+    ctx.save()
+    click.echo("Seed data created successfully!")
+    click.echo(f"  Policies: {len(policies_data)}")
+    click.echo(f"  Groups: {len(groups_data)}")
+    click.echo(f"  Users: {len(users_data)}")
+    click.echo(f"  Roles: {len(roles_data)}")
+
+
+@cli.command("services")
+def services_cmd():
+    """Listar serviços AWS simulados e suas ações."""
+    for svc in list_services():
+        click.echo(f"\n  {svc.upper()}:")
+        for action in get_actions_for_service(svc):
+            click.echo(f"    - {action}")
+
+
+# ─── HANDLER DE ERROS ─────────────────────────────────────────────
+
+def main():
+    try:
+        cli()
+    except IAMSimulatorError as e:
+        raise click.ClickException(str(e))
+    except KeyboardInterrupt:
+        click.echo("\nInterrupted.")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
