@@ -336,3 +336,47 @@ def evaluate_access(action: str, resource: str,
         "principal_arn": principal_arn,
         "principal_name": principal_name,
     }
+
+
+def evaluate_trust_policy(role: Role, principal_arn: str, principal_type: str = "User") -> dict[str, Any]:
+    """
+    Avalia se um principal pode assumir uma role (trust policy).
+
+    Retorna:
+        {
+            "allowed": bool,
+            "reason": "Allow" | "Deny" | "ImplicitDeny",
+        }
+    """
+    trust_doc = role.AssumeRolePolicyDocument
+    if not trust_doc:
+        return {"allowed": False, "reason": "ImplicitDeny"}
+
+    stmts = trust_doc.get("Statement", [])
+    if isinstance(stmts, dict):
+        stmts = [stmts]
+
+    for stmt in stmts:
+        if stmt.get("Effect") != "Allow":
+            continue
+
+        principal = stmt.get("Principal", {})
+        if isinstance(principal, str) and principal == "*":
+            return {"allowed": True, "reason": "Allow"}
+
+        if isinstance(principal, dict):
+            aws_principals = principal.get("AWS", [])
+            if isinstance(aws_principals, str):
+                aws_principals = [aws_principals]
+            service_principals = principal.get("Service", [])
+            if isinstance(service_principals, str):
+                service_principals = [service_principals]
+
+            if principal_arn in aws_principals or "*" in aws_principals:
+                return {"allowed": True, "reason": "Allow"}
+
+            if principal_type == "Service":
+                if principal_arn in service_principals or "*" in service_principals:
+                    return {"allowed": True, "reason": "Allow"}
+
+    return {"allowed": False, "reason": "ImplicitDeny"}

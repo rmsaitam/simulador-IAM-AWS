@@ -14,7 +14,7 @@ from .exceptions import (
 )
 from .models import User, Group, Policy, Role, validate_entity_name
 from .storage import load_data, persist_all, load_users, load_groups, load_policies, load_roles
-from .policy_engine import evaluate_access
+from .policy_engine import evaluate_access, evaluate_trust_policy
 from .services import get_service_from_arn, get_actions_for_service, list_services, validate_action, SERVICE_ACTIONS
 
 DATA_FILE = None  # Usa o padrão
@@ -43,15 +43,16 @@ def _validate_name(name: str):
 
 class IAMContext:
     """Contexto compartilhado entre os comandos CLI."""
-    def __init__(self):
-        self.data = load_data()
+    def __init__(self, data_file=None):
+        self.data = load_data(data_file)
         self.users = load_users(self.data)
         self.groups = load_groups(self.data)
         self.policies = load_policies(self.data)
         self.roles = load_roles(self.data)
+        self._data_file = data_file
 
     def save(self):
-        persist_all(self.users, self.groups, self.policies, self.roles)
+        persist_all(self.users, self.groups, self.policies, self.roles, self._data_file)
 
 
 pass_context = click.make_pass_decorator(IAMContext, ensure=True)
@@ -70,9 +71,12 @@ class IAMGroup(click.Group):
 
 @click.group(cls=IAMGroup)
 @click.version_option(version="1.0.0", prog_name="iam-simulator")
-def cli():
+@click.option("--data-file", "-d", default=None, type=click.Path(), help="Caminho do arquivo de dados JSON")
+@click.pass_context
+def cli(ctx, data_file):
     """Simulador IAM AWS - CLI para simular políticas e acesso a recursos AWS."""
-    pass
+    ctx.ensure_object(IAMContext)
+    ctx.obj = IAMContext(data_file=data_file)
 
 
 # ─── USUÁRIOS ─────────────────────────────────────────────────────
