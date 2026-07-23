@@ -92,8 +92,9 @@ def user():
 @click.option("--groups", "-g", default="", help="Grupos separados por vírgula")
 @click.option("--policies", "-p", default="", help="Políticas separadas por vírgula")
 @click.option("--tags", "-t", default="", help="Tags no formato key1=val1,key2=val2")
+@click.option("--permission-boundary", "-b", default="", help="Permission boundary (política gerenciada)")
 @pass_context
-def user_create(ctx: IAMContext, name: str, groups: str, policies: str, tags: str):
+def user_create(ctx: IAMContext, name: str, groups: str, policies: str, tags: str, permission_boundary: str):
     """Criar um novo usuário IAM."""
     _validate_name(name)
     if name in ctx.users:
@@ -109,8 +110,13 @@ def user_create(ctx: IAMContext, name: str, groups: str, policies: str, tags: st
         if pname not in ctx.policies:
             raise EntityNotFoundError("Policy", pname)
 
+    if permission_boundary:
+        if permission_boundary not in ctx.policies:
+            raise EntityNotFoundError("Policy", permission_boundary)
+
     tag_list = _parse_tags(tags)
-    user_obj = User(UserName=name, Groups=group_list, AttachedPolicies=policy_list, Tags=tag_list)
+    user_obj = User(UserName=name, Groups=group_list, AttachedPolicies=policy_list,
+                    Tags=tag_list, PermissionBoundary=permission_boundary)
 
     for gname in group_list:
         ctx.groups[gname].Members.append(name)
@@ -124,6 +130,8 @@ def user_create(ctx: IAMContext, name: str, groups: str, policies: str, tags: st
         click.echo(f"  Policies: {', '.join(policy_list)}")
     if tag_list:
         click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in tag_list)}")
+    if permission_boundary:
+        click.echo(f"  PermissionBoundary: {permission_boundary}")
 
 
 @user.command("list")
@@ -206,6 +214,8 @@ def user_get(ctx: IAMContext, name: str, json_output: bool):
     click.echo(f"  CreateDate: {u.CreateDate}")
     click.echo(f"  Groups: {', '.join(u.Groups) if u.Groups else 'none'}")
     click.echo(f"  AttachedPolicies: {', '.join(u.AttachedPolicies) if u.AttachedPolicies else 'none'}")
+    if u.PermissionBoundary:
+        click.echo(f"  PermissionBoundary: {u.PermissionBoundary}")
     if u.Tags:
         click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in u.Tags)}")
     if u.InlinePolicies:
@@ -293,6 +303,42 @@ def user_remove_group(ctx: IAMContext, user_name: str, group_name: str):
     ]
     ctx.save()
     click.echo(f"User '{user_name}' removed from group '{group_name}'.")
+
+
+@user.command("attach-permission-boundary")
+@click.argument("user_name")
+@click.argument("policy_name")
+@pass_context
+def user_attach_permission_boundary(ctx: IAMContext, user_name: str, policy_name: str):
+    """Anexar uma permission boundary a um usuário."""
+    if user_name not in ctx.users:
+        raise EntityNotFoundError("User", user_name)
+    if policy_name not in ctx.policies:
+        raise EntityNotFoundError("Policy", policy_name)
+    if ctx.users[user_name].PermissionBoundary:
+        click.echo(f"User '{user_name}' already has a permission boundary.")
+        return
+
+    ctx.users[user_name].PermissionBoundary = policy_name
+    ctx.save()
+    click.echo(f"Permission boundary '{policy_name}' attached to user '{user_name}'.")
+
+
+@user.command("detach-permission-boundary")
+@click.argument("user_name")
+@pass_context
+def user_detach_permission_boundary(ctx: IAMContext, user_name: str):
+    """Remover a permission boundary de um usuário."""
+    if user_name not in ctx.users:
+        raise EntityNotFoundError("User", user_name)
+    if not ctx.users[user_name].PermissionBoundary:
+        click.echo(f"User '{user_name}' does not have a permission boundary.")
+        return
+
+    old = ctx.users[user_name].PermissionBoundary
+    ctx.users[user_name].PermissionBoundary = ""
+    ctx.save()
+    click.echo(f"Permission boundary '{old}' detached from user '{user_name}'.")
 
 
 # ─── GRUPOS ───────────────────────────────────────────────────────
@@ -606,8 +652,9 @@ def role():
 @click.option("--policies", "-p", default="", help="Políticas separadas por vírgula")
 @click.option("--file", "-f", "from_file", is_flag=True, help="Indica que --trust-policy é um caminho de arquivo")
 @click.option("--tags", "-T", default="", help="Tags no formato key1=val1,key2=val2")
+@click.option("--permission-boundary", "-b", default="", help="Permission boundary (política gerenciada)")
 @pass_context
-def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, from_file: bool, tags: str):
+def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, from_file: bool, tags: str, permission_boundary: str):
     """Criar uma nova role IAM."""
     _validate_name(name)
     if name in ctx.roles:
@@ -644,12 +691,17 @@ def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, fr
         if pname not in ctx.policies:
             raise EntityNotFoundError("Policy", pname)
 
+    if permission_boundary:
+        if permission_boundary not in ctx.policies:
+            raise EntityNotFoundError("Policy", permission_boundary)
+
     tag_list = _parse_tags(tags)
     role_obj = Role(
         RoleName=name,
         AssumeRolePolicyDocument=tp_doc,
         AttachedPolicies=policy_list,
         Tags=tag_list,
+        PermissionBoundary=permission_boundary,
     )
     for pname in policy_list:
         ctx.policies[pname].AttachmentCount += 1
@@ -660,6 +712,8 @@ def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, fr
     click.echo(f"  ARN: {role_obj.Arn}")
     if tag_list:
         click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in tag_list)}")
+    if permission_boundary:
+        click.echo(f"  PermissionBoundary: {permission_boundary}")
 
 
 @role.command("list")
@@ -734,6 +788,8 @@ def role_get(ctx: IAMContext, name: str, json_output: bool):
     click.echo(f"  RoleId: {r.RoleId}")
     click.echo(f"  CreateDate: {r.CreateDate}")
     click.echo(f"  AttachedPolicies: {', '.join(r.AttachedPolicies) if r.AttachedPolicies else 'none'}")
+    if r.PermissionBoundary:
+        click.echo(f"  PermissionBoundary: {r.PermissionBoundary}")
     if r.Tags:
         click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in r.Tags)}")
     click.echo(f"  AssumeRolePolicyDocument:")
@@ -779,6 +835,42 @@ def role_detach_policy(ctx: IAMContext, role_name: str, policy_name: str):
         )
     ctx.save()
     click.echo(f"Policy '{policy_name}' detached from role '{role_name}'.")
+
+
+@role.command("attach-permission-boundary")
+@click.argument("role_name")
+@click.argument("policy_name")
+@pass_context
+def role_attach_permission_boundary(ctx: IAMContext, role_name: str, policy_name: str):
+    """Anexar uma permission boundary a uma role."""
+    if role_name not in ctx.roles:
+        raise EntityNotFoundError("Role", role_name)
+    if policy_name not in ctx.policies:
+        raise EntityNotFoundError("Policy", policy_name)
+    if ctx.roles[role_name].PermissionBoundary:
+        click.echo(f"Role '{role_name}' already has a permission boundary.")
+        return
+
+    ctx.roles[role_name].PermissionBoundary = policy_name
+    ctx.save()
+    click.echo(f"Permission boundary '{policy_name}' attached to role '{role_name}'.")
+
+
+@role.command("detach-permission-boundary")
+@click.argument("role_name")
+@pass_context
+def role_detach_permission_boundary(ctx: IAMContext, role_name: str):
+    """Remover a permission boundary de uma role."""
+    if role_name not in ctx.roles:
+        raise EntityNotFoundError("Role", role_name)
+    if not ctx.roles[role_name].PermissionBoundary:
+        click.echo(f"Role '{role_name}' does not have a permission boundary.")
+        return
+
+    old = ctx.roles[role_name].PermissionBoundary
+    ctx.roles[role_name].PermissionBoundary = ""
+    ctx.save()
+    click.echo(f"Permission boundary '{old}' detached from role '{role_name}'.")
 
 
 # ─── SIMULAÇÃO DE ACESSO ──────────────────────────────────────────
