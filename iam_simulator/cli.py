@@ -129,6 +129,11 @@ def user_delete(ctx: IAMContext, name: str):
             ctx.groups[gname].Members = [
                 m for m in ctx.groups[gname].Members if m != name
             ]
+    for pname in user_obj.AttachedPolicies:
+        if pname in ctx.policies:
+            ctx.policies[pname].AttachmentCount = max(
+                0, ctx.policies[pname].AttachmentCount - 1
+            )
     del ctx.users[name]
     ctx.save()
     click.echo(f"User '{name}' deleted successfully.")
@@ -443,6 +448,16 @@ def policy_delete(ctx: IAMContext, name: str):
     if name not in ctx.policies:
         raise EntityNotFoundError("Policy", name)
 
+    for user_obj in ctx.users.values():
+        if name in user_obj.AttachedPolicies:
+            user_obj.AttachedPolicies.remove(name)
+    for group_obj in ctx.groups.values():
+        if name in group_obj.AttachedPolicies:
+            group_obj.AttachedPolicies.remove(name)
+    for role_obj in ctx.roles.values():
+        if name in role_obj.AttachedPolicies:
+            role_obj.AttachedPolicies.remove(name)
+
     del ctx.policies[name]
     ctx.save()
     click.echo(f"Policy '{name}' deleted successfully.")
@@ -555,6 +570,12 @@ def role_delete(ctx: IAMContext, name: str):
     if name not in ctx.roles:
         raise EntityNotFoundError("Role", name)
 
+    role_obj = ctx.roles[name]
+    for pname in role_obj.AttachedPolicies:
+        if pname in ctx.policies:
+            ctx.policies[pname].AttachmentCount = max(
+                0, ctx.policies[pname].AttachmentCount - 1
+            )
     del ctx.roles[name]
     ctx.save()
     click.echo(f"Role '{name}' deleted successfully.")
