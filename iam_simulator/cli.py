@@ -12,12 +12,33 @@ from .exceptions import (
     EntityNotFoundError,
     AccessDeniedError,
 )
-from .models import User, Group, Policy, Role
+from .models import User, Group, Policy, Role, validate_entity_name
 from .storage import load_data, persist_all, load_users, load_groups, load_policies, load_roles
 from .policy_engine import evaluate_access
 from .services import get_service_from_arn, get_actions_for_service, list_services, validate_action, SERVICE_ACTIONS
 
 DATA_FILE = None  # Usa o padrão
+
+
+def _parse_tags(tags_str: str) -> list[dict]:
+    """Parse 'key1=val1,key2=val2' into [{'Key': 'key1', 'Value': 'val1'}, ...]."""
+    if not tags_str:
+        return []
+    tags = []
+    for pair in tags_str.split(","):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            tags.append({"Key": k.strip(), "Value": v.strip()})
+    return tags
+
+
+def _validate_name(name: str):
+    """Valida nome de entidade IAM."""
+    if not validate_entity_name(name):
+        raise click.ClickException(
+            f"Invalid entity name '{name}'. Must be max 64 characters "
+            f"and contain only [a-zA-Z0-9+=,.@_-]"
+        )
 
 
 class IAMContext:
@@ -66,9 +87,11 @@ def user():
 @click.argument("name")
 @click.option("--groups", "-g", default="", help="Grupos separados por vírgula")
 @click.option("--policies", "-p", default="", help="Políticas separadas por vírgula")
+@click.option("--tags", "-t", default="", help="Tags no formato key1=val1,key2=val2")
 @pass_context
-def user_create(ctx: IAMContext, name: str, groups: str, policies: str):
+def user_create(ctx: IAMContext, name: str, groups: str, policies: str, tags: str):
     """Criar um novo usuário IAM."""
+    _validate_name(name)
     if name in ctx.users:
         raise EntityAlreadyExistsError("User", name)
 
@@ -82,7 +105,8 @@ def user_create(ctx: IAMContext, name: str, groups: str, policies: str):
         if pname not in ctx.policies:
             raise EntityNotFoundError("Policy", pname)
 
-    user_obj = User(UserName=name, Groups=group_list, AttachedPolicies=policy_list)
+    tag_list = _parse_tags(tags)
+    user_obj = User(UserName=name, Groups=group_list, AttachedPolicies=policy_list, Tags=tag_list)
 
     for gname in group_list:
         ctx.groups[gname].Members.append(name)
@@ -94,6 +118,8 @@ def user_create(ctx: IAMContext, name: str, groups: str, policies: str):
         click.echo(f"  Groups: {', '.join(group_list)}")
     if policy_list:
         click.echo(f"  Policies: {', '.join(policy_list)}")
+    if tag_list:
+        click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in tag_list)}")
 
 
 @user.command("list")
@@ -252,9 +278,11 @@ def group():
 @group.command("create")
 @click.argument("name")
 @click.option("--policies", "-p", default="", help="Políticas separadas por vírgula")
+@click.option("--tags", "-t", default="", help="Tags no formato key1=val1,key2=val2")
 @pass_context
-def group_create(ctx: IAMContext, name: str, policies: str):
+def group_create(ctx: IAMContext, name: str, policies: str, tags: str):
     """Criar um novo grupo IAM."""
+    _validate_name(name)
     if name in ctx.groups:
         raise EntityAlreadyExistsError("Group", name)
 
@@ -263,7 +291,8 @@ def group_create(ctx: IAMContext, name: str, policies: str):
         if pname not in ctx.policies:
             raise EntityNotFoundError("Policy", pname)
 
-    group_obj = Group(GroupName=name, AttachedPolicies=policy_list)
+    tag_list = _parse_tags(tags)
+    group_obj = Group(GroupName=name, AttachedPolicies=policy_list, Tags=tag_list)
     for pname in policy_list:
         ctx.policies[pname].AttachmentCount += 1
 
@@ -272,6 +301,8 @@ def group_create(ctx: IAMContext, name: str, policies: str):
     click.echo(f"Group '{name}' created successfully.")
     if policy_list:
         click.echo(f"  Policies: {', '.join(policy_list)}")
+    if tag_list:
+        click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in tag_list)}")
 
 
 @group.command("list")
@@ -389,9 +420,11 @@ def policy():
 @click.argument("name")
 @click.option("--document", "-d", required=True, help="JSON do documento da política (inline ou caminho de arquivo)")
 @click.option("--file", "-f", "from_file", is_flag=True, help="Indica que --document é um caminho de arquivo")
+@click.option("--tags", "-t", default="", help="Tags no formato key1=val1,key2=val2")
 @pass_context
-def policy_create(ctx: IAMContext, name: str, document: str, from_file: bool):
+def policy_create(ctx: IAMContext, name: str, document: str, from_file: bool, tags: str):
     """Criar uma nova política IAM."""
+    _validate_name(name)
     if name in ctx.policies:
         raise EntityAlreadyExistsError("Policy", name)
 
@@ -415,11 +448,14 @@ def policy_create(ctx: IAMContext, name: str, document: str, from_file: bool):
         click.echo("Error: Policy must contain a 'Statement' field.", err=True)
         sys.exit(1)
 
-    policy_obj = Policy(PolicyName=name, PolicyDocument=doc)
+    tag_list = _parse_tags(tags)
+    policy_obj = Policy(PolicyName=name, PolicyDocument=doc, Tags=tag_list)
     ctx.policies[name] = policy_obj
     ctx.save()
     click.echo(f"Policy '{name}' created successfully.")
     click.echo(f"  ARN: {policy_obj.Arn}")
+    if tag_list:
+        click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in tag_list)}")
 
 
 @policy.command("list")
@@ -493,9 +529,11 @@ def role():
 @click.option("--trust-policy", "-t", default="", help="Trust policy JSON (inline ou arquivo)")
 @click.option("--policies", "-p", default="", help="Políticas separadas por vírgula")
 @click.option("--file", "-f", "from_file", is_flag=True, help="Indica que --trust-policy é um caminho de arquivo")
+@click.option("--tags", "-T", default="", help="Tags no formato key1=val1,key2=val2")
 @pass_context
-def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, from_file: bool):
+def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, from_file: bool, tags: str):
     """Criar uma nova role IAM."""
+    _validate_name(name)
     if name in ctx.roles:
         raise EntityAlreadyExistsError("Role", name)
 
@@ -530,10 +568,12 @@ def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, fr
         if pname not in ctx.policies:
             raise EntityNotFoundError("Policy", pname)
 
+    tag_list = _parse_tags(tags)
     role_obj = Role(
         RoleName=name,
         AssumeRolePolicyDocument=tp_doc,
         AttachedPolicies=policy_list,
+        Tags=tag_list,
     )
     for pname in policy_list:
         ctx.policies[pname].AttachmentCount += 1
@@ -542,6 +582,8 @@ def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, fr
     ctx.save()
     click.echo(f"Role '{name}' created successfully.")
     click.echo(f"  ARN: {role_obj.Arn}")
+    if tag_list:
+        click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in tag_list)}")
 
 
 @role.command("list")
@@ -992,6 +1034,94 @@ def seed(ctx: IAMContext):
     click.echo(f"  Groups: {len(groups_data)}")
     click.echo(f"  Users: {len(users_data)}")
     click.echo(f"  Roles: {len(roles_data)}")
+
+
+@cli.command("report")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
+@pass_context
+def report(ctx: IAMContext, json_output: bool):
+    """Gerar relatório de segurança do IAM."""
+    report_data = {
+        "users": [],
+        "groups": [],
+        "policies": [],
+        "roles": [],
+    }
+
+    for name, u in sorted(ctx.users.items()):
+        user_report = {
+            "name": u.UserName,
+            "arn": u.Arn,
+            "groups": u.Groups,
+            "attached_policies": u.AttachedPolicies,
+            "inline_policies": [ip.get("PolicyName", "unnamed") for ip in u.InlinePolicies],
+            "tags": u.Tags,
+        }
+        report_data["users"].append(user_report)
+
+    for name, g in sorted(ctx.groups.items()):
+        group_report = {
+            "name": g.GroupName,
+            "arn": g.Arn,
+            "members": g.Members,
+            "attached_policies": g.AttachedPolicies,
+            "inline_policies": [ip.get("PolicyName", "unnamed") for ip in g.InlinePolicies],
+            "tags": g.Tags,
+        }
+        report_data["groups"].append(group_report)
+
+    for name, p in sorted(ctx.policies.items()):
+        policy_report = {
+            "name": p.PolicyName,
+            "arn": p.Arn,
+            "attachment_count": p.AttachmentCount,
+            "tags": p.Tags,
+        }
+        report_data["policies"].append(policy_report)
+
+    for name, r in sorted(ctx.roles.items()):
+        role_report = {
+            "name": r.RoleName,
+            "arn": r.Arn,
+            "attached_policies": r.AttachedPolicies,
+            "inline_policies": [ip.get("PolicyName", "unnamed") for ip in r.InlinePolicies],
+            "trust_policy": r.AssumeRolePolicyDocument,
+            "tags": r.Tags,
+        }
+        report_data["roles"].append(role_report)
+
+    if json_output:
+        click.echo(json.dumps(report_data, indent=2))
+    else:
+        click.secho("\n=== IAM Security Report ===\n", bold=True)
+        click.echo(f"Users: {len(report_data['users'])}")
+        click.echo(f"Groups: {len(report_data['groups'])}")
+        click.echo(f"Policies: {len(report_data['policies'])}")
+        click.echo(f"Roles: {len(report_data['roles'])}")
+
+        click.secho("\n--- Users ---", bold=True)
+        for u in report_data["users"]:
+            click.echo(f"  {u['name']}")
+            click.echo(f"    Groups: {', '.join(u['groups']) if u['groups'] else 'none'}")
+            click.echo(f"    Policies: {', '.join(u['attached_policies']) if u['attached_policies'] else 'none'}")
+            if u['tags']:
+                click.echo(f"    Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in u['tags'])}")
+
+        click.secho("\n--- Groups ---", bold=True)
+        for g in report_data["groups"]:
+            click.echo(f"  {g['name']}")
+            click.echo(f"    Members: {', '.join(g['members']) if g['members'] else 'none'}")
+            click.echo(f"    Policies: {', '.join(g['attached_policies']) if g['attached_policies'] else 'none'}")
+
+        click.secho("\n--- Policies ---", bold=True)
+        for p in report_data["policies"]:
+            click.echo(f"  {p['name']} (attachments: {p['attachment_count']})")
+
+        click.secho("\n--- Roles ---", bold=True)
+        for r in report_data["roles"]:
+            click.echo(f"  {r['name']}")
+            click.echo(f"    Policies: {', '.join(r['attached_policies']) if r['attached_policies'] else 'none'}")
+        click.echo("")
 
 
 @cli.command("services")
