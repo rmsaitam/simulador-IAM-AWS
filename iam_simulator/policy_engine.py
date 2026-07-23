@@ -34,7 +34,7 @@ def _action_match(pattern: str, action: str) -> bool:
 
 
 def _evaluate_condition(condition: dict[str, Any], context: dict[str, str]) -> bool:
-    """Avalia uma condição básica. Retorna True se a condição é satisfeita."""
+    """Avalia uma condição. Retorna True se a condição é satisfeita."""
     if not condition:
         return True
 
@@ -64,6 +64,120 @@ def _evaluate_condition(condition: dict[str, Any], context: dict[str, str]) -> b
                     for ev in expected_values:
                         if fnmatch(actual_value, ev):
                             return False
+                elif condition_op == "StringEqualsIgnoreCase":
+                    if actual_value.lower() not in [v.lower() for v in expected_values]:
+                        return False
+                elif condition_op == "StringStartsWith":
+                    matched = False
+                    for ev in expected_values:
+                        if actual_value.startswith(ev):
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "StringEndsWith":
+                    matched = False
+                    for ev in expected_values:
+                        if actual_value.endswith(ev):
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "StringContains":
+                    matched = False
+                    for ev in expected_values:
+                        if ev in actual_value:
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "NumericEquals":
+                    try:
+                        if float(actual_value) not in [float(v) for v in expected_values]:
+                            return False
+                    except ValueError:
+                        return False
+                elif condition_op == "NumericNotEquals":
+                    try:
+                        if float(actual_value) in [float(v) for v in expected_values]:
+                            return False
+                    except ValueError:
+                        return False
+                elif condition_op == "NumericLessThan":
+                    try:
+                        if float(actual_value) >= float(expected_values[0]):
+                            return False
+                    except (ValueError, IndexError):
+                        return False
+                elif condition_op == "NumericLessThanEquals":
+                    try:
+                        if float(actual_value) > float(expected_values[0]):
+                            return False
+                    except (ValueError, IndexError):
+                        return False
+                elif condition_op == "NumericGreaterThan":
+                    try:
+                        if float(actual_value) <= float(expected_values[0]):
+                            return False
+                    except (ValueError, IndexError):
+                        return False
+                elif condition_op == "NumericGreaterThanEquals":
+                    try:
+                        if float(actual_value) < float(expected_values[0]):
+                            return False
+                    except (ValueError, IndexError):
+                        return False
+                elif condition_op == "Bool":
+                    actual_lower = actual_value.lower()
+                    if actual_lower not in [v.lower() for v in expected_values]:
+                        return False
+                elif condition_op == "ArnLike":
+                    matched = False
+                    for ev in expected_values:
+                        if fnmatch(actual_value, ev):
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "ArnEquals":
+                    if actual_value not in expected_values:
+                        return False
+                elif condition_op == "ArnNotLike":
+                    for ev in expected_values:
+                        if fnmatch(actual_value, ev):
+                            return False
+                elif condition_op == "ArnNotEquals":
+                    if actual_value in expected_values:
+                        return False
+                elif condition_op == "IpAddress":
+                    matched = False
+                    for ev in expected_values:
+                        if fnmatch(actual_value, ev):
+                            matched = True
+                            break
+                    if not matched:
+                        return False
+                elif condition_op == "NotIpAddress":
+                    for ev in expected_values:
+                        if fnmatch(actual_value, ev):
+                            return False
+                elif condition_op == "Null":
+                    check_not_exists = expected_values[0].lower() == "true" if expected_values else False
+                    value_exists = key in context
+                    if check_not_exists and value_exists:
+                        return False
+                    if not check_not_exists and not value_exists:
+                        return False
+                elif condition_op == "ForAllValues":
+                    actual_set = set(actual_value.split(",")) if actual_value else set()
+                    expected_set = set(expected_values)
+                    if not actual_set.issubset(expected_set):
+                        return False
+                elif condition_op == "ForAnyValue":
+                    actual_set = set(actual_value.split(",")) if actual_value else set()
+                    expected_set = set(expected_values)
+                    if not actual_set.intersection(expected_set):
+                        return False
     return True
 
 

@@ -987,6 +987,75 @@ def services_cmd():
             click.echo(f"    - {action}")
 
 
+@cli.command("validate")
+@click.option("--document", "-d", required=True, help="JSON do documento da política (inline ou caminho)")
+@click.option("--file", "-f", "from_file", is_flag=True, help="Indica que --document é um caminho de arquivo")
+def validate_policy(document: str, from_file: bool):
+    """Validar um documento de política IAM."""
+    if from_file:
+        doc_path = Path(document)
+        if not doc_path.exists():
+            click.echo(f"Error: File '{document}' not found.", err=True)
+            sys.exit(1)
+        with open(doc_path) as f:
+            doc = json.load(f)
+    else:
+        try:
+            doc = json.loads(document)
+        except json.JSONDecodeError as e:
+            click.echo(f"Error: Invalid JSON: {e}", err=True)
+            sys.exit(1)
+
+    errors = []
+
+    if "Version" not in doc:
+        errors.append("Missing 'Version' field")
+    elif doc["Version"] != "2012-10-17":
+        errors.append(f"Invalid Version: '{doc['Version']}' (expected '2012-10-17')")
+
+    if "Statement" not in doc:
+        errors.append("Missing 'Statement' field")
+    else:
+        stmts = doc["Statement"]
+        if isinstance(stmts, dict):
+            stmts = [stmts]
+        if not isinstance(stmts, list):
+            errors.append("'Statement' must be a list or dict")
+        else:
+            for i, stmt in enumerate(stmts):
+                prefix = f"Statement[{i}]"
+                if "Effect" not in stmt:
+                    errors.append(f"{prefix}: missing 'Effect'")
+                elif stmt["Effect"] not in ("Allow", "Deny"):
+                    errors.append(f"{prefix}: invalid Effect '{stmt['Effect']}' (must be 'Allow' or 'Deny')")
+                if "Action" not in stmt:
+                    errors.append(f"{prefix}: missing 'Action'")
+                else:
+                    actions = stmt["Action"]
+                    if isinstance(actions, str):
+                        actions = [actions]
+                    for a in actions:
+                        if ":" not in a and a != "*":
+                            errors.append(f"{prefix}: invalid Action format '{a}' (expected 'service:Action')")
+                if "Resource" not in stmt:
+                    errors.append(f"{prefix}: missing 'Resource'")
+                else:
+                    resources = stmt["Resource"]
+                    if isinstance(resources, str):
+                        resources = [resources]
+                    for r in resources:
+                        if r != "*" and not r.startswith("arn:"):
+                            errors.append(f"{prefix}: invalid Resource ARN '{r}'")
+
+    if errors:
+        click.secho(f"\nValidation failed with {len(errors)} error(s):", fg="red", bold=True)
+        for err in errors:
+            click.echo(f"  - {err}")
+        sys.exit(1)
+    else:
+        click.secho("Policy document is valid.", fg="green", bold=True)
+
+
 # ─── HANDLER DE ERROS ─────────────────────────────────────────────
 
 def main():
