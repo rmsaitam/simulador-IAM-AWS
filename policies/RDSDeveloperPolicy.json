@@ -1,0 +1,33 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RDSAllowAccess",
+      "Effect": "Allow",
+      "Action": [
+        "rds:DescribeDBInstances",
+        "rds:DescribeDBClusters",
+        "rds:CreateDBInstance",
+        "rds:ModifyDBInstance",
+        "rds:StopDBInstance",
+        "rds:StartDBInstance",
+        "rds:RebootDBInstance",
+        "rds:CreateDBSnapshot",
+        "rds:RestoreDBInstanceFromDBSnapshot",
+        "rds:AddTagsToResource",
+        "rds:RemoveTagsFromResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "RDSDenyDrop",
+      "Effect": "Deny",
+      "Action": [
+        "rds:DeleteDBInstance",
+        "rds:DeleteDBCluster",
+        "rds:DeleteDBSnapshot"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

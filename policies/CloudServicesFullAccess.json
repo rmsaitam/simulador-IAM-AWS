@@ -1,0 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECSFullAccess",
+      "Effect": "Allow",
+      "Action": "ecs:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRFullAccess",
+      "Effect": "Allow",
+      "Action": "ecr:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "EKSFullAccess",
+      "Effect": "Allow",
+      "Action": "eks:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SNSFullAccess",
+      "Effect": "Allow",
+      "Action": "sns:*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SQSFullAccess",
+      "Effect": "Allow",
+      "Action": "sqs:*",
+      "Resource": "*"
+    }
+  ]
+}
