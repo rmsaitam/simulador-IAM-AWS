@@ -2,11 +2,20 @@
 
 from dataclasses import dataclass, field
 from typing import Any
+import re
 import time
+import uuid
 
 
 def _timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def validate_entity_name(name: str) -> bool:
+    """Valida nome de entidade IAM (max 64 chars, alfanuméricos e sinais permitidos)."""
+    if len(name) > 64:
+        return False
+    return bool(re.match(r'^[a-zA-Z0-9+=,.@_\-]+$', name))
 
 
 @dataclass
@@ -51,6 +60,7 @@ class Policy:
     Arn: str = ""
     CreateDate: str = ""
     AttachmentCount: int = 0
+    Tags: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.Arn:
@@ -65,17 +75,20 @@ class Policy:
         return [PolicyDocument.from_dict(s) for s in stmts]
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "PolicyName": self.PolicyName,
             "PolicyDocument": self.PolicyDocument,
             "Arn": self.Arn,
             "CreateDate": self.CreateDate,
             "AttachmentCount": self.AttachmentCount,
         }
+        if self.Tags:
+            d["Tags"] = self.Tags
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "Policy":
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -88,17 +101,18 @@ class User:
     Groups: list[str] = field(default_factory=list)
     AttachedPolicies: list[str] = field(default_factory=list)
     InlinePolicies: list[dict] = field(default_factory=list)
+    Tags: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.UserId:
-            self.UserId = f"AIDAXXXXXXXXXXXXXXXXX"
+            self.UserId = f"AIDA{uuid.uuid4().hex[:16].upper()}"
         if not self.Arn:
             self.Arn = f"arn:aws:iam::123456789012:user/{self.UserName}"
         if not self.CreateDate:
             self.CreateDate = _timestamp()
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "UserName": self.UserName,
             "UserId": self.UserId,
             "Arn": self.Arn,
@@ -107,10 +121,13 @@ class User:
             "AttachedPolicies": self.AttachedPolicies,
             "InlinePolicies": self.InlinePolicies,
         }
+        if self.Tags:
+            d["Tags"] = self.Tags
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "User":
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -123,17 +140,18 @@ class Group:
     Members: list[str] = field(default_factory=list)
     AttachedPolicies: list[str] = field(default_factory=list)
     InlinePolicies: list[dict] = field(default_factory=list)
+    Tags: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.GroupId:
-            self.GroupId = f"AIDAXXXXXXXXXXXXXXXXX"
+            self.GroupId = f"AGPA{uuid.uuid4().hex[:16].upper()}"
         if not self.Arn:
             self.Arn = f"arn:aws:iam::123456789012:group/{self.GroupName}"
         if not self.CreateDate:
             self.CreateDate = _timestamp()
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "GroupName": self.GroupName,
             "GroupId": self.GroupId,
             "Arn": self.Arn,
@@ -142,10 +160,13 @@ class Group:
             "AttachedPolicies": self.AttachedPolicies,
             "InlinePolicies": self.InlinePolicies,
         }
+        if self.Tags:
+            d["Tags"] = self.Tags
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "Group":
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
@@ -158,10 +179,11 @@ class Role:
     AssumeRolePolicyDocument: dict = field(default_factory=dict)
     AttachedPolicies: list[str] = field(default_factory=list)
     InlinePolicies: list[dict] = field(default_factory=list)
+    Tags: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.RoleId:
-            self.RoleId = f"AROAXXXXXXXXXXXXXXXXX"
+            self.RoleId = f"AROA{uuid.uuid4().hex[:16].upper()}"
         if not self.Arn:
             self.Arn = f"arn:aws:iam::123456789012:role/{self.RoleName}"
         if not self.CreateDate:
@@ -179,7 +201,7 @@ class Role:
             }
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "RoleName": self.RoleName,
             "RoleId": self.RoleId,
             "Arn": self.Arn,
@@ -188,7 +210,10 @@ class Role:
             "AttachedPolicies": self.AttachedPolicies,
             "InlinePolicies": self.InlinePolicies,
         }
+        if self.Tags:
+            d["Tags"] = self.Tags
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "Role":
-        return cls(**data)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
