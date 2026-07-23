@@ -124,19 +124,36 @@ def user_create(ctx: IAMContext, name: str, groups: str, policies: str, tags: st
 
 @user.command("list")
 @click.option("--verbose", "-v", is_flag=True, help="Mostrar detalhes")
+@click.option("--filter", "-F", "filter_str", default="", help="Filtrar por nome, grupo ou política")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def user_list(ctx: IAMContext, verbose: bool):
+def user_list(ctx: IAMContext, verbose: bool, filter_str: str, json_output: bool):
     """Listar todos os usuários."""
-    if not ctx.users:
+    users = dict(sorted(ctx.users.items()))
+
+    if filter_str:
+        users = {n: u for n, u in users.items()
+                 if filter_str in n
+                 or filter_str in u.Groups
+                 or filter_str in u.AttachedPolicies
+                 or any(filter_str in t.get("Key", "") or filter_str in t.get("Value", "") for t in u.Tags)}
+
+    if json_output:
+        click.echo(json.dumps({n: u.to_dict() for n, u in users.items()}, indent=2))
+        return
+
+    if not users:
         click.echo("No users found.")
         return
 
-    for name, u in sorted(ctx.users.items()):
+    for name, u in users.items():
         if verbose:
             click.echo(f"  {u.UserName}")
             click.echo(f"    ARN: {u.Arn}")
             click.echo(f"    Groups: {', '.join(u.Groups) if u.Groups else 'none'}")
             click.echo(f"    Policies: {', '.join(u.AttachedPolicies) if u.AttachedPolicies else 'none'}")
+            if u.Tags:
+                click.echo(f"    Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in u.Tags)}")
         else:
             click.echo(f"  {u.UserName}")
 
@@ -167,19 +184,26 @@ def user_delete(ctx: IAMContext, name: str):
 
 @user.command("get")
 @click.argument("name")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def user_get(ctx: IAMContext, name: str):
+def user_get(ctx: IAMContext, name: str, json_output: bool):
     """Obter detalhes de um usuário."""
     if name not in ctx.users:
         raise EntityNotFoundError("User", name)
 
     u = ctx.users[name]
+    if json_output:
+        click.echo(json.dumps(u.to_dict(), indent=2))
+        return
+
     click.echo(f"User: {u.UserName}")
     click.echo(f"  ARN: {u.Arn}")
     click.echo(f"  UserId: {u.UserId}")
     click.echo(f"  CreateDate: {u.CreateDate}")
     click.echo(f"  Groups: {', '.join(u.Groups) if u.Groups else 'none'}")
     click.echo(f"  AttachedPolicies: {', '.join(u.AttachedPolicies) if u.AttachedPolicies else 'none'}")
+    if u.Tags:
+        click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in u.Tags)}")
     if u.InlinePolicies:
         click.echo(f"  InlinePolicies:")
         for ip in u.InlinePolicies:
@@ -307,19 +331,36 @@ def group_create(ctx: IAMContext, name: str, policies: str, tags: str):
 
 @group.command("list")
 @click.option("--verbose", "-v", is_flag=True, help="Mostrar detalhes")
+@click.option("--filter", "-F", "filter_str", default="", help="Filtrar por nome, membro ou política")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def group_list(ctx: IAMContext, verbose: bool):
+def group_list(ctx: IAMContext, verbose: bool, filter_str: str, json_output: bool):
     """Listar todos os grupos."""
-    if not ctx.groups:
+    groups = dict(sorted(ctx.groups.items()))
+
+    if filter_str:
+        groups = {n: g for n, g in groups.items()
+                  if filter_str in n
+                  or filter_str in g.Members
+                  or filter_str in g.AttachedPolicies
+                  or any(filter_str in t.get("Key", "") or filter_str in t.get("Value", "") for t in g.Tags)}
+
+    if json_output:
+        click.echo(json.dumps({n: g.to_dict() for n, g in groups.items()}, indent=2))
+        return
+
+    if not groups:
         click.echo("No groups found.")
         return
 
-    for name, g in sorted(ctx.groups.items()):
+    for name, g in groups.items():
         if verbose:
             click.echo(f"  {g.GroupName}")
             click.echo(f"    ARN: {g.Arn}")
             click.echo(f"    Members: {', '.join(g.Members) if g.Members else 'none'}")
             click.echo(f"    Policies: {', '.join(g.AttachedPolicies) if g.AttachedPolicies else 'none'}")
+            if g.Tags:
+                click.echo(f"    Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in g.Tags)}")
         else:
             click.echo(f"  {g.GroupName}")
 
@@ -352,19 +393,26 @@ def group_delete(ctx: IAMContext, name: str):
 
 @group.command("get")
 @click.argument("name")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def group_get(ctx: IAMContext, name: str):
+def group_get(ctx: IAMContext, name: str, json_output: bool):
     """Obter detalhes de um grupo."""
     if name not in ctx.groups:
         raise EntityNotFoundError("Group", name)
 
     g = ctx.groups[name]
+    if json_output:
+        click.echo(json.dumps(g.to_dict(), indent=2))
+        return
+
     click.echo(f"Group: {g.GroupName}")
     click.echo(f"  ARN: {g.Arn}")
     click.echo(f"  GroupId: {g.GroupId}")
     click.echo(f"  CreateDate: {g.CreateDate}")
     click.echo(f"  Members: {', '.join(g.Members) if g.Members else 'none'}")
     click.echo(f"  AttachedPolicies: {', '.join(g.AttachedPolicies) if g.AttachedPolicies else 'none'}")
+    if g.Tags:
+        click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in g.Tags)}")
 
 
 @group.command("attach-policy")
@@ -460,18 +508,35 @@ def policy_create(ctx: IAMContext, name: str, document: str, from_file: bool, ta
 
 @policy.command("list")
 @click.option("--verbose", "-v", is_flag=True, help="Mostrar detalhes")
+@click.option("--filter", "-F", "filter_str", default="", help="Filtrar por nome ou attachment")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def policy_list(ctx: IAMContext, verbose: bool):
+def policy_list(ctx: IAMContext, verbose: bool, filter_str: str, json_output: bool):
     """Listar todas as políticas."""
-    if not ctx.policies:
+    policies = dict(sorted(ctx.policies.items()))
+
+    if filter_str:
+        policies = {n: p for n, p in policies.items()
+                    if filter_str in n
+                    or (filter_str == "attached" and p.AttachmentCount > 0)
+                    or (filter_str == "unattached" and p.AttachmentCount == 0)
+                    or any(filter_str in t.get("Key", "") or filter_str in t.get("Value", "") for t in p.Tags)}
+
+    if json_output:
+        click.echo(json.dumps({n: p.to_dict() for n, p in policies.items()}, indent=2))
+        return
+
+    if not policies:
         click.echo("No policies found.")
         return
 
-    for name, p in sorted(ctx.policies.items()):
+    for name, p in policies.items():
         if verbose:
             click.echo(f"  {p.PolicyName}")
             click.echo(f"    ARN: {p.Arn}")
             click.echo(f"    Attachments: {p.AttachmentCount}")
+            if p.Tags:
+                click.echo(f"    Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in p.Tags)}")
         else:
             click.echo(f"  {p.PolicyName}")
 
@@ -501,17 +566,24 @@ def policy_delete(ctx: IAMContext, name: str):
 
 @policy.command("get")
 @click.argument("name")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def policy_get(ctx: IAMContext, name: str):
+def policy_get(ctx: IAMContext, name: str, json_output: bool):
     """Obter detalhes e documento de uma política."""
     if name not in ctx.policies:
         raise EntityNotFoundError("Policy", name)
 
     p = ctx.policies[name]
+    if json_output:
+        click.echo(json.dumps(p.to_dict(), indent=2))
+        return
+
     click.echo(f"Policy: {p.PolicyName}")
     click.echo(f"  ARN: {p.Arn}")
     click.echo(f"  CreateDate: {p.CreateDate}")
     click.echo(f"  Attachments: {p.AttachmentCount}")
+    if p.Tags:
+        click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in p.Tags)}")
     click.echo(f"  Document:")
     click.echo(json.dumps(p.PolicyDocument, indent=4))
 
@@ -588,18 +660,34 @@ def role_create(ctx: IAMContext, name: str, trust_policy: str, policies: str, fr
 
 @role.command("list")
 @click.option("--verbose", "-v", is_flag=True, help="Mostrar detalhes")
+@click.option("--filter", "-F", "filter_str", default="", help="Filtrar por nome ou política")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def role_list(ctx: IAMContext, verbose: bool):
+def role_list(ctx: IAMContext, verbose: bool, filter_str: str, json_output: bool):
     """Listar todas as roles."""
-    if not ctx.roles:
+    roles = dict(sorted(ctx.roles.items()))
+
+    if filter_str:
+        roles = {n: r for n, r in roles.items()
+                 if filter_str in n
+                 or filter_str in r.AttachedPolicies
+                 or any(filter_str in t.get("Key", "") or filter_str in t.get("Value", "") for t in r.Tags)}
+
+    if json_output:
+        click.echo(json.dumps({n: r.to_dict() for n, r in roles.items()}, indent=2))
+        return
+
+    if not roles:
         click.echo("No roles found.")
         return
 
-    for name, r in sorted(ctx.roles.items()):
+    for name, r in roles.items():
         if verbose:
             click.echo(f"  {r.RoleName}")
             click.echo(f"    ARN: {r.Arn}")
             click.echo(f"    Policies: {', '.join(r.AttachedPolicies) if r.AttachedPolicies else 'none'}")
+            if r.Tags:
+                click.echo(f"    Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in r.Tags)}")
         else:
             click.echo(f"  {r.RoleName}")
 
@@ -625,18 +713,25 @@ def role_delete(ctx: IAMContext, name: str):
 
 @role.command("get")
 @click.argument("name")
+@click.option("--json-output", "-j", is_flag=True, help="Saída em formato JSON")
 @pass_context
-def role_get(ctx: IAMContext, name: str):
+def role_get(ctx: IAMContext, name: str, json_output: bool):
     """Obter detalhes de uma role."""
     if name not in ctx.roles:
         raise EntityNotFoundError("Role", name)
 
     r = ctx.roles[name]
+    if json_output:
+        click.echo(json.dumps(r.to_dict(), indent=2))
+        return
+
     click.echo(f"Role: {r.RoleName}")
     click.echo(f"  ARN: {r.Arn}")
     click.echo(f"  RoleId: {r.RoleId}")
     click.echo(f"  CreateDate: {r.CreateDate}")
     click.echo(f"  AttachedPolicies: {', '.join(r.AttachedPolicies) if r.AttachedPolicies else 'none'}")
+    if r.Tags:
+        click.echo(f"  Tags: {', '.join(f'{t['Key']}={t['Value']}' for t in r.Tags)}")
     click.echo(f"  AssumeRolePolicyDocument:")
     click.echo(json.dumps(r.AssumeRolePolicyDocument, indent=4))
 
