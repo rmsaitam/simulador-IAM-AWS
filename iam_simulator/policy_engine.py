@@ -266,7 +266,7 @@ def evaluate_access(action: str, resource: str,
     Retorna:
         {
             "allowed": bool,
-            "reason": "Allow" | "Deny" | "ImplicitDeny",
+            "reason": "Allow" | "Deny" | "ImplicitDeny" | "BoundaryDeny",
             "matched_policies": list[str],
             "denied_by": str | None,
         }
@@ -276,15 +276,20 @@ def evaluate_access(action: str, resource: str,
     context = context or {}
 
     collected_policies: list[Policy] = []
+    boundary_name: str | None = None
 
     if user:
         collected_policies = _collect_policies_from_user(user, groups, policies)
         principal_arn = user.Arn
         principal_name = user.UserName
+        if user.PermissionBoundary and user.PermissionBoundary in policies:
+            boundary_name = user.PermissionBoundary
     elif role:
         collected_policies = _collect_policies_from_role(role, policies)
         principal_arn = role.Arn
         principal_name = role.RoleName
+        if role.PermissionBoundary and role.PermissionBoundary in policies:
+            boundary_name = role.PermissionBoundary
     else:
         return {
             "allowed": False,
@@ -318,20 +323,34 @@ def evaluate_access(action: str, resource: str,
             "principal_name": principal_name,
         }
 
-    if matched:
+    if not matched:
         return {
-            "allowed": True,
-            "reason": "Allow",
-            "matched_policies": matched,
+            "allowed": False,
+            "reason": "ImplicitDeny",
+            "matched_policies": [],
             "denied_by": None,
             "principal_arn": principal_arn,
             "principal_name": principal_name,
         }
 
+    if boundary_name:
+        boundary_policy = policies[boundary_name]
+        boundary_stmts = boundary_policy.statements()
+        boundary_result = _eval_statements(boundary_stmts, action, resource, context)
+        if boundary_result != "Allow":
+            return {
+                "allowed": False,
+                "reason": "BoundaryDeny",
+                "matched_policies": matched,
+                "denied_by": boundary_name,
+                "principal_arn": principal_arn,
+                "principal_name": principal_name,
+            }
+
     return {
-        "allowed": False,
-        "reason": "ImplicitDeny",
-        "matched_policies": [],
+        "allowed": True,
+        "reason": "Allow",
+        "matched_policies": matched,
         "denied_by": None,
         "principal_arn": principal_arn,
         "principal_name": principal_name,

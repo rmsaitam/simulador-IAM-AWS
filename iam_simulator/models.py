@@ -102,6 +102,7 @@ class User:
     AttachedPolicies: list[str] = field(default_factory=list)
     InlinePolicies: list[dict] = field(default_factory=list)
     Tags: list[dict] = field(default_factory=list)
+    PermissionBoundary: str = ""
 
     def __post_init__(self):
         if not self.UserId:
@@ -123,6 +124,8 @@ class User:
         }
         if self.Tags:
             d["Tags"] = self.Tags
+        if self.PermissionBoundary:
+            d["PermissionBoundary"] = self.PermissionBoundary
         return d
 
     @classmethod
@@ -180,6 +183,7 @@ class Role:
     AttachedPolicies: list[str] = field(default_factory=list)
     InlinePolicies: list[dict] = field(default_factory=list)
     Tags: list[dict] = field(default_factory=list)
+    PermissionBoundary: str = ""
 
     def __post_init__(self):
         if not self.RoleId:
@@ -212,6 +216,8 @@ class Role:
         }
         if self.Tags:
             d["Tags"] = self.Tags
+        if self.PermissionBoundary:
+            d["PermissionBoundary"] = self.PermissionBoundary
         return d
 
     @classmethod

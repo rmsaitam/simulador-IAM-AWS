@@ -188,7 +188,7 @@ iam --data-file <arquivo.json> <comando>  # Usar arquivo de dados alternativo
 ### Usuários
 
 ```bash
-iam user create <nome> [--groups g1,g2] [--policies p1,p2] [--tags k1=v1,k2=v2]
+iam user create <nome> [--groups g1,g2] [--policies p1,p2] [--tags k1=v1,k2=v2] [--permission-boundary <policy>]
 iam user list [--verbose] [--filter <termo>] [--json-output]
 iam user get <nome> [--json-output]
 iam user delete <nome>
@@ -196,6 +196,8 @@ iam user attach-policy <user> <policy>
 iam user detach-policy <user> <policy>
 iam user add-group <user> <group>
 iam user remove-group <user> <group>
+iam user attach-permission-boundary <user> <policy>
+iam user detach-permission-boundary <user>
 ```
 
 ### Grupos
@@ -222,12 +224,14 @@ iam policy delete <nome>
 ### Roles
 
 ```bash
-iam role create <nome> [--trust-policy <json>] [--policies p1,p2] [--tags k1=v1,k2=v2]
+iam role create <nome> [--trust-policy <json>] [--policies p1,p2] [--tags k1=v1,k2=val2] [--permission-boundary <policy>]
 iam role list [--verbose] [--filter <termo>] [--json-output]
 iam role get <nome> [--json-output]
 iam role delete <nome>
 iam role attach-policy <role> <policy>
 iam role detach-policy <role> <policy>
+iam role attach-permission-boundary <role> <policy>
+iam role detach-permission-boundary <role>
 ```
 
 ### Simulação de Acesso
@@ -280,7 +284,27 @@ iam services       # Serviços e ações disponíveis
 1. Coleta todas as políticas aplicáveis (inline + gerenciadas + grupos)
 2. Verifica **Explicit Deny** (sempre vence)
 3. Verifica **Allow** (pelo menos uma política deve permitir)
-4. Sem allow = **ImplicitDeny**
+4. Verifica **Permission Boundary** (se definida, deve permitir também)
+5. Sem allow = **ImplicitDeny**
+
+### Permission Boundaries
+
+Permission boundaries definem o limite máximo de permissões. Mesmo que uma política permita, a boundary deve permitir também:
+
+```bash
+# Criar política de boundary (somente leitura)
+iam policy create ReadOnlyBoundary --document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:Get*","s3:List*","ec2:Describe*"],"Resource":"*"}]}'
+
+# Criar usuário com boundary
+iam user create dev-readonly --policies S3FullAccess --permission-boundary ReadOnlyBoundary
+
+# Resultado: pode ler (Get), mas não pode escrever (Put)
+$ iam sim-access --user dev-readonly --action s3:GetObject --resource "arn:aws:s3:::bucket/*"
+  Access Granted
+
+$ iam sim-access --user dev-readonly --action s3:PutObject --resource "arn:aws:s3:::bucket/*"
+  AccessDeniedException (BoundaryDeny)
+```
 
 ### Condições Suportadas
 
